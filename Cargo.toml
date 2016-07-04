@@ -1,0 +1,12 @@
+[package]
+name    = "netmachines"
+version = "0.1.0"
+authors = ["Martin Hoffmann <hn@nvnc.de>"]
+
+[lib]
+name = "netmachines"
+path = "src/lib.rs"
+
+[dependencies]
+rotor = "0.6"
+
