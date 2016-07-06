@@ -1,6 +1,6 @@
 //! Socket traits and implementations for standard network sockets.
 //!
-//! Instead of using socket object directly, we are generalizing everything
+//! Instead of using socket objects directly, we are generalizing everything
 //! over a trait for the socket category we want to use. This way, we can
 //! replace the actual networked sockets easily with various kinds of mock
 //! sockets for testing.
@@ -8,14 +8,13 @@
 //! There’s five traits for the five categories of transport sockets. Three
 //! traits are for stream sockets (ie., those based on TCP for networked
 //! sockets): [ClearStream] for unencrypted streams, [SecureStream] for
-//! uncrypted streams, and [HybridStream] for a stream that starts out
-//! unencrypted but can be switched to an encrypted stream at any time.
+//! encrypted streams, and [HybridStream] for streams that start out
+//! unencrypted but can have encryption switched on at any time.
 //!
 //! For datagram sockets (ie., UDP), there’s only two traits: [ClearDgram]
 //! and [SecureDgram] for unencrypted and encrypted datagram sockets,
 //! respectively. (If there actually is applications that start DTLS late
-//! on a UDP socket, we’ll add HybrdDgram, too. For the moment, I am not
-//! quite clear how that would actually work.)
+//! on a UDP socket, we’ll add HybridDgram, too.)
 //!
 //! When implementing handlers, always make the implementation generic over
 //! one of these traits so that you can use them with real networked sockets
@@ -148,7 +147,7 @@ pub trait HybridStream: Read + Write + Evented {
     /// still in progress, they will fail with `WouldBlock`. If the
     /// handshake fails, all reading and writing will fail with
     /// `ConnectionAborted`.
-    fn start_tls(&mut self) -> Result<()> 
+    fn start_tls(&mut self) -> Result<()>;
 }
 
 

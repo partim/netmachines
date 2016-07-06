@@ -3,7 +3,7 @@
 use std::cmp::min;
 use std::fmt;
 use std::time::Duration;
-use rotor::{EventSet, Response, Scope, Time};
+use rotor::{EventSet, Scope, Time};
 
 
 //------------ Next ---------------------------------------------------------
@@ -29,7 +29,7 @@ impl Next {
     
     pub fn read_and_write() -> Next { Next::new(Interest::ReadWrite) }
     
-    pub fn close() -> Next { Next::new(Interest::Close) }
+    pub fn remove() -> Next { Next::new(Interest::Remove) }
 
     pub fn timeout(mut self, duration: Duration) -> Self {
         self.timeout = Some(duration);
@@ -59,7 +59,7 @@ pub enum Interest {
     Read,
     Write,
     ReadWrite,
-    Close
+    Remove
 }
 
 
@@ -82,7 +82,7 @@ impl Intent {
         let interest = match self.interest {
             Some(interest) =>  {
                 match (interest, other.interest) {
-                    (Close, _) | (_, Close) => Close,
+                    (Remove, _) | (_, Remove) => Remove,
                     (ReadWrite, _) | (_, ReadWrite) | (Read, Write) |
                     (Write, Read) => {
                         ReadWrite
@@ -106,8 +106,19 @@ impl Intent {
         Intent { interest: Some(interest), deadline: deadline }
     }
 
+    pub fn interest(&self) -> Interest {
+        match self.interest {
+            Some(interest) => interest,
+            None => Interest::Wait
+        }
+    }
+
+    pub fn deadline(&self) -> Option<Time> {
+        self.deadline
+    }
+
     pub fn is_close(&self) -> bool {
-        self.interest == Some(Interest::Close)
+        self.interest == Some(Interest::Remove)
     }
 
     /// Returns the events for self.
@@ -121,25 +132,10 @@ impl Intent {
             Some(Interest::ReadWrite) => {
                 Some(EventSet::readable() | EventSet::writable())
             }
-            Some(Interest::Close) => None,
+            Some(Interest::Remove) => None,
             None => unreachable!()
         }
     }
-
-    pub fn response<M, S>(self, machine: M) -> Response<M, S> {
-        match self.interest {
-            Some(Interest::Close) => Response::done(),
-            _ => { 
-                if let Some(deadline) = self.deadline {
-                    Response::ok(machine).deadline(deadline)
-                }
-                else {
-                    Response::ok(machine)
-                }
-            }
-        }
-    }
-
 }
 
 //--- Default

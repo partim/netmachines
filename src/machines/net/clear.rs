@@ -6,7 +6,7 @@ use rotor::mio::tcp::TcpStream;
 use rotor::mio::udp::UdpSocket;
 use ::error::Error;
 use ::handlers::TransportHandler;
-use ::next::{Intent, Next};
+use ::next::{Intent, Interest, Next};
 use ::sync::Receiver;
 use super::transport::TransportMachine;
 
@@ -38,7 +38,24 @@ impl<X, H: TransportHandler<TcpStream>> TcpTransport<X, H> {
                 Err(err) => return Response::error(err.into())
             }
         }
-        self.intent.response(self)
+        self.response()
+    }
+
+    fn response<S>(self) -> Response<Self, S> {
+        match self.intent.interest() {
+            Interest::Remove => {
+                self.handler.on_remove(self.sock);
+                Response::done()
+            }
+            _ => {
+                if let Some(deadline) = self.intent.deadline() {
+                    Response::ok(self).deadline(deadline)
+                }
+                else {
+                    Response::ok(self)
+                }
+            }
+        }
     }
 }
 
@@ -58,7 +75,7 @@ impl<X, H> TransportMachine<X, TcpStream, H> for TcpTransport<X, H>
                 Err(err) => return Response::error(err.into())
             }
         }
-        conn.intent.response(conn)
+        conn.response()
     }
 
     fn ready<S>(mut self, events: EventSet, scope: &mut Scope<X>)
@@ -137,7 +154,24 @@ impl<X, H: TransportHandler<UdpSocket>> UdpTransport<X, H> {
                 Err(err) => return Response::error(err.into())
             }
         }
-        self.intent.response(self)
+        self.response()
+    }
+
+    fn response<S>(self) -> Response<Self, S> {
+        match self.intent.interest() {
+            Interest::Remove => {
+                self.handler.on_remove(self.sock);
+                Response::done()
+            }
+            _ => {
+                if let Some(deadline) = self.intent.deadline() {
+                    Response::ok(self).deadline(deadline)
+                }
+                else {
+                    Response::ok(self)
+                }
+            }
+        }
     }
 }
 
@@ -157,7 +191,7 @@ impl<X, H> TransportMachine<X, UdpSocket, H> for UdpTransport<X, H>
                 Err(err) => return Response::error(err.into())
             }
         }
-        conn.intent.response(conn)
+        conn.response()
     }
 
     fn ready<S>(mut self, events: EventSet, scope: &mut Scope<X>)

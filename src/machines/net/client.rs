@@ -2,26 +2,27 @@
 
 use std::marker::PhantomData;
 use rotor::{EventSet, Machine, Response, Scope, Void};
-use ::handlers::ConnectHandler;
+use ::handlers::CreateHandler;
 use ::sync::{ctrl_channel, Receiver, TryRecvError};
 use super::transport::TransportMachine;
 
 
 //------------ ClientMachine ------------------------------------------------
 
-pub struct ClientMachine<X, T, H, C>(ClientInner<C, T>, PhantomData<(X, T, H)>)
-           where T: Send, H: ConnectHandler<X, T>,
+pub struct ClientMachine<X, S, T, H, C>(ClientInner<C, S, T>,
+                                        PhantomData<(X, H)>)
+           where S: Send, T: Send, H: CreateHandler<S, T>,
                  C: TransportMachine<X, T, H::Output>;
 
-enum ClientInner<C, T> {
-    Ctrl(Receiver<T>),
+enum ClientInner<C, S, T> {
+    Ctrl(Receiver<(S, T)>),
     Conn(C)
 }
 
-impl<X, T, H, C> ClientMachine<X, T, H, C>
-                 where T: Send, H: ConnectHandler<X, T>,
+impl<X, S, T, H, C> ClientMachine<X, S, T, H, C>
+                 where S: Send, T: Send, H: CreateHandler<S, T>,
                        C: TransportMachine<X, T, H::Output> {
-    fn ctrl(ctrl: Receiver<T>) -> Self {
+    fn ctrl(ctrl: Receiver<(S, T)>) -> Self {
         ClientMachine(ClientInner::Ctrl(ctrl), PhantomData)
     }
 
@@ -30,16 +31,16 @@ impl<X, T, H, C> ClientMachine<X, T, H, C>
     }
 }
 
-impl<X, T, H, C> Machine for ClientMachine<X, T, H, C>
-                 where T: Send, H: ConnectHandler<X, T>,
+impl<X, S, T, H, C> Machine for ClientMachine<X, S, T, H, C>
+                 where S: Send, T: Send, H: CreateHandler<S, T>,
                        C: TransportMachine<X, T, H::Output> {
     type Context = X;
-    type Seed = T;
+    type Seed = (S, T);
 
-    fn create(mut seed: T, scope: &mut Scope<X>) -> Response<Self, Void> {
+    fn create(mut seed: (S, T), scope: &mut Scope<X>) -> Response<Self, Void> {
         let (ctrl, rx) = ctrl_channel(scope.notifier());
-        let handler = H::on_connect(scope, &mut seed, ctrl);
-        C::create(seed, handler, rx, scope).map(ClientMachine::conn,
+        let handler = H::on_create(seed.0, &mut seed.1, ctrl);
+        C::create(seed.1, handler, rx, scope).map(ClientMachine::conn,
                                                 |seed| seed)
     }
 
@@ -80,8 +81,9 @@ impl<X, T, H, C> Machine for ClientMachine<X, T, H, C>
             ClientInner::Ctrl(rx) => {
                 loop {
                     match rx.try_recv() {
-                        Ok(sock) => {
-                            return Response::spawn(ClientMachine::ctrl(rx), sock)
+                        Ok(seed) => {
+                            return Response::spawn(ClientMachine::ctrl(rx),
+                                                   seed)
                         }
                         Err(TryRecvError::Empty) => {
                             return Response::ok(ClientMachine::ctrl(rx))
