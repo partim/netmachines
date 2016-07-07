@@ -6,6 +6,7 @@ use rotor::{EventSet, Machine, Response, Scope, Void};
 use ::handlers::AcceptHandler;
 use ::sockets::Accept;
 use ::sync::ctrl_channel;
+use ::utils::ResponseExt;
 use super::transport::TransportMachine;
 
 
@@ -49,8 +50,7 @@ impl<X, T, H, M> Machine for ServerMachine<X, T, H, M>
             Some(handler) => handler,
             None => return Response::done()
         };
-        M::create(seed.0, handler, rx, scope).map(ServerMachine::conn,
-                                                  |seed| seed)
+        M::create(seed.0, handler, rx, scope).map_self(ServerMachine::conn)
     }
 
     fn ready(self, events: EventSet, scope: &mut Scope<X>)
@@ -71,7 +71,7 @@ impl<X, T, H, M> Machine for ServerMachine<X, T, H, M>
                 }
             }
             ServerInner::Conn(conn) => {
-                conn.ready(events, scope).map(ServerMachine::conn, |seed| seed)
+                conn.ready(events, scope).map_self(ServerMachine::conn)
             }
         }
     }
@@ -93,7 +93,7 @@ impl<X, T, H, M> Machine for ServerMachine<X, T, H, M>
                 }
             }
             ServerInner::Conn(conn) => {
-                conn.spawned(scope).map(ServerMachine::conn, |seed| seed)
+                conn.spawned(scope).map_self(ServerMachine::conn)
             }
         }
     }
@@ -102,7 +102,7 @@ impl<X, T, H, M> Machine for ServerMachine<X, T, H, M>
         match self.0 {
             ServerInner::Lsnr(_) => unreachable!("listener can’t timeout"),
             ServerInner::Conn(conn) => {
-                conn.timeout(scope).map(ServerMachine::conn, |seed| seed)
+                conn.timeout(scope).map_self(ServerMachine::conn)
             }
         }
     }
@@ -111,7 +111,7 @@ impl<X, T, H, M> Machine for ServerMachine<X, T, H, M>
         match self.0 {
             ServerInner::Lsnr(_) => unreachable!("listener can’t wakeup"),
             ServerInner::Conn(conn) => {
-                conn.wakeup(scope).map(ServerMachine::conn, |seed| seed)
+                conn.wakeup(scope).map_self(ServerMachine::conn)
             }
         }
     }
