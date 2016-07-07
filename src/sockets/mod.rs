@@ -5,16 +5,19 @@
 //! replace the actual networked sockets easily with various kinds of mock
 //! sockets for testing.
 //!
-//! There’s five traits for the five categories of transport sockets. Three
-//! traits are for stream sockets (ie., those based on TCP for networked
-//! sockets): [ClearStream] for unencrypted streams, [SecureStream] for
-//! encrypted streams, and [HybridStream] for streams that start out
+//! There’s four traits for the four categories of transport sockets for
+//! which this crate implements state machines.
+//!
+//! Three traits are for stream sockets (ie., those based on TCP for
+//! networked sockets): [ClearStream] for unencrypted streams, [SecureStream]
+//! for encrypted streams, and [HybridStream] for streams that start out
 //! unencrypted but can have encryption switched on at any time.
 //!
-//! For datagram sockets (ie., UDP), there’s only two traits: [ClearDgram]
-//! and [SecureDgram] for unencrypted and encrypted datagram sockets,
-//! respectively. (If there actually is applications that start DTLS late
-//! on a UDP socket, we’ll add HybridDgram, too.)
+//! For datagram sockets (ie., UDP), there’s only one trait, [Dgram], for
+//! unencrypted sockets. While technically there are encrypted datagram
+//! sockets, too, most protocols that use these have additional usage
+//! rules that seem to make it slightly pointless to provide standard
+//! implementations.
 //!
 //! When implementing handlers, always make the implementation generic over
 //! one of these traits so that you can use them with real networked sockets
@@ -28,8 +31,7 @@
 //! [ClearStream]: trait.ClearStream.html
 //! [SecureStream]: trait.SecureStream.html
 //! [HybridStream]: trait.HybridStream.html
-//! [ClearDgram]: trait.ClearDgram.html
-//! [SecureDgram]: trait.SecureDgram.html
+//! [Dgram]: trait.ClearDgram.html
 //! [Accept]: trait.Accept.html
 
 use std::io::{self, Read, Write};
@@ -38,6 +40,9 @@ use rotor::mio::Evented;
 use rotor::mio::tcp::{TcpListener, TcpStream};
 use rotor::mio::udp::UdpSocket;
 use ::error::Result;
+
+#[cfg(feature = "openssl")]
+pub mod openssl;
 
 
 //------------ Accept -------------------------------------------------------
@@ -117,7 +122,10 @@ impl ClearStream for TcpStream { }
 ///
 /// [ClearStream]: trait.ClearStream.html
 /// [TransportHandler]: ../handlers/trait.TransportHandler.html
-pub trait SecureStream: Read + Write + Evented { }
+pub trait SecureStream: Read + Write + Evented {
+    /// Returns whether the stream is currently blocked.
+    fn blocked(&self) -> Option<Blocked>;
+}
 
 
 //------------ HybridStream -------------------------------------------------
@@ -145,13 +153,25 @@ pub trait HybridStream: Read + Write + Evented {
     /// However, reading and writing after calling this method will only
     /// succeed if the handshake has succeeded. While the handshake is
     /// still in progress, they will fail with `WouldBlock`. If the
-    /// handshake fails, all reading and writing will fail with
-    /// `ConnectionAborted`.
-    fn start_tls(&mut self) -> Result<()>;
+    /// call to this method fails or, later on, the handshake fails, all
+    /// reading and writing will fail with `ConnectionAborted`.
+    ///
+    /// # Panics
+    ///
+    /// The method panics if the stream is already secure.
+    fn connect_secure(&mut self) -> Result<()>;
+
+    fn accept_secure(&mut self) -> Result<()>;
+
+    /// Returns whether the stream is currently blocked.
+    fn blocked(&self) -> Option<Blocked>;
+
+    /// Returns whether the stream is encrypted.
+    fn is_secure(&self) -> bool;
 }
 
 
-//------------ ClearDgram ---------------------------------------------------
+//------------ Dgram ---------------------------------------------------
 
 /// A trait for unencrypted datagram sockets.
 ///
@@ -167,9 +187,9 @@ pub trait HybridStream: Read + Write + Evented {
 /// address the message was sent from.
 ///
 /// XXX Should we add the triple of `connect()`, `send()` and `recv()`
-///     to the trait?
+///     to the trait? Or add a ConnectedDgram trait?
 ///
-pub trait ClearDgram: Evented {
+pub trait Dgram: Evented {
     /// Attempts to retrieve an incoming message from the socket.
     ///
     /// If there is at least one pending message available and it was
@@ -209,7 +229,7 @@ pub trait ClearDgram: Evented {
 
 //--- impl for UdpSocket
 
-impl ClearDgram for UdpSocket {
+impl Dgram for UdpSocket {
     fn recv_from(&self, buf: &mut [u8])
                  -> io::Result<Option<(usize, SocketAddr)>> {
         self.recv_from(buf)
@@ -222,56 +242,11 @@ impl ClearDgram for UdpSocket {
 }
 
 
-//------------ SecureDgram --------------------------------------------------
+//------------ Blocked -------------------------------------------------------
 
-/// A trait for encrypted datagram sockets.
-///
-/// These sockets provide transportation of unencrypted, unreliable,
-/// connectionless messages of a limited size. They behave mostly identical
-/// to unencrypted [ClearDgram] sockets accept that messages are
-/// transparently encrypted when sending and decrypted when receiving.
-/// Networked sockets use DTLS for this purpose, mock sockets can do
-/// whatever they want.
-///
-/// In order to allow for encryption, a separate encryption session has to
-/// be established for each remote address communication is desired with.
-/// The [SecureDgram] socket takes care of all that. This means that both
-/// `send_to()` and `recv_from()` will return `Ok(None)` more often while
-/// the socket deals with handshake.
-pub trait SecureDgram: Evented {
-    /// Attempts to retrieve an incoming message from the socket.
-    ///
-    /// If there is at least one pending message available and it was
-    /// successfully retrieved, the method will copy the message’s content
-    /// into `buf` and return `Ok(Some(..))` with the number of bytes
-    /// copied and the remote address the message was sent from. If the
-    /// message was longer than the provided buffer, excess bytes will be
-    /// discarded quietly. Zero-length messages are valid, so
-    /// `Ok(Some((0, _))` is a perfectly fine result and (unlike with stream
-    /// sockets) has no special meaning attached.
-    ///
-    /// If there are no pending messages, returns `Ok(None)` and doesn’t do
-    /// anything else.
-    ///
-    /// Any other returned error condition is likely fatal.
-    fn recv_from(&self, buf: &mut [u8])
-                 -> io::Result<Option<(usize, SocketAddr)>>;
-
-    /// Sends a message to the socket.
-    ///
-    /// The message content is given in `buf` and the remote address to
-    /// which the message should be sent in `target`.
-    ///
-    /// If the socket is writable and the message was sent successfully,
-    /// returns `Ok(Some(_))` with the number of bytes sent. Because
-    /// datagram sockets are unreliable, this does not mean the message has
-    /// actually arrived at the far end.
-    ///
-    /// If the socket is not writable, returns `Ok(None)`.
-    ///
-    /// If the buffer is too large to be sent, the method will fail with
-    /// `Other` (XXX presumably, someone should try that).
-    fn send_to(&self, buf: &[u8], target: &SocketAddr)
-               -> io::Result<Option<usize>>;
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum Blocked {
+    Read,
+    Write
 }
 

@@ -5,12 +5,16 @@ use std::fmt;
 use std::io;
 use std::result;
 
+#[cfg(feature = "openssl")]
+use openssl::ssl::error::SslError as OpensslError;
+
 //------------ Error --------------------------------------------------------
 
 #[derive(Debug)]
 pub enum Error {
-    Timeout,
     Io(io::Error),
+    Timeout,
+    Tls, // XXX Make this proper.
 }
 
 impl fmt::Display for Error {
@@ -25,8 +29,9 @@ impl fmt::Display for Error {
 impl error::Error for Error {
     fn description(&self) -> &str {
         match *self {
+            Error::Io(ref err) => err.description(),
             Error::Timeout => "Timeout",
-            Error::Io(ref err) => err.description()
+            Error::Tls => "TLS error",
         }
     }
 
@@ -44,6 +49,15 @@ impl From<io::Error> for Error {
     }
 }
 
+#[cfg(feature = "openssl")]
+impl From<OpensslError> for Error {
+    fn from(err: OpensslError) -> Error {
+        match err {
+            OpensslError::StreamError(err) => Error::Io(err),
+            _ => Error::Tls
+        }
+    }
+}
 
 //------------ Result -------------------------------------------------------
 

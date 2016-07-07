@@ -10,3 +10,14 @@ path = "src/lib.rs"
 [dependencies]
 rotor = "0.6"
 
+[dependencies.openssl]
+version = "0.7"
+optional = true
+
+[dependencies.security-framework]
+version = "0.1"
+optional = true
+
+[features]
+default = ["ssl"]
+ssl = ["openssl"]
