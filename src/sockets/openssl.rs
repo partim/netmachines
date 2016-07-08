@@ -7,7 +7,7 @@ use openssl::ssl::{self, SslContext, SslStream};
 use rotor::{Evented, EventSet, PollOpt};
 use rotor::mio::{Selector, Token};
 use rotor::mio::tcp::{TcpListener, TcpStream};
-use super::{Accept, Blocked, SecureStream, HybridStream};
+use super::{Accept, Blocked, HybridStream, SecureStream, Transport};
 use ::error::Result;
 
 
@@ -93,11 +93,7 @@ impl TlsStream {
     }
 }
 
-impl SecureStream for TlsStream {
-    fn blocked(&self) -> Option<Blocked> {
-        self.blocked
-    }
-}
+impl SecureStream for TlsStream { }
 
 impl io::Read for TlsStream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
@@ -116,6 +112,17 @@ impl io::Write for TlsStream {
         self.sock.flush()
     }
 }
+
+impl Transport for TlsStream {
+    fn take_socket_error(&mut self) -> io::Result<()> {
+        self.sock.get_mut().take_socket_error()
+    }
+
+    fn blocked(&self) -> Option<Blocked> {
+        self.blocked
+    }
+}
+
 
 impl Evented for TlsStream {
     fn register(&self, selector: &mut Selector, token: Token,
@@ -272,10 +279,6 @@ impl HybridStream for StartTlsStream {
         }
     }
 
-    fn blocked(&self) -> Option<Blocked> {
-        self.blocked
-    }
-
     fn is_secure(&self) -> bool {
         match self.sock {
             Some(StartTlsSock::Secure(_)) => true,
@@ -315,6 +318,27 @@ impl io::Write for StartTlsStream {
 
     fn flush(&mut self) -> io::Result<()> {
         try!(self.get_mut_sock()).flush()
+    }
+}
+
+impl Transport for StartTlsStream {
+    fn take_socket_error(&mut self) -> io::Result<()> {
+        match self.sock {
+            Some(StartTlsSock::Clear(ref mut sock)) => {
+                sock.take_socket_error()
+            }
+            Some(StartTlsSock::Secure(ref mut sock)) => {
+                sock.get_mut().take_socket_error()
+            }
+            None => {
+                Err(io::Error::new(io::ErrorKind::ConnectionAborted,
+                                   "stream unusable"))
+            }
+        }
+    }
+
+    fn blocked(&self) -> Option<Blocked> {
+        self.blocked
     }
 }
 

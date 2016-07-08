@@ -22,6 +22,12 @@ pub fn ctrl_channel(notify: Notifier) -> (Control, Receiver<Next>) {
     (Control { tx: tx }, rx)
 }
 
+pub fn funnel_channel<R: Send>(notify: Notifier)
+                            -> (Funnel<R>, Receiver<R>) {
+    let (tx, rx) = channel(notify);
+    (Funnel { tx: tx }, rx)
+}
+
 
 //------------ Sender -------------------------------------------------------
 
@@ -144,6 +150,38 @@ impl error::Error for ControlError {
 }
 
 impl fmt::Display for ControlError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str(error::Error::description(self))
+    }
+}
+
+
+//------------ Funnel -------------------------------------------------------
+
+#[derive(Clone, Debug)]
+pub struct Funnel<R: Send> {
+    tx: Sender<R>
+}
+
+impl<R: Send> Funnel<R> {
+    pub fn send(&self, request: R) -> Result<(), FunnelError> {
+        self.tx.send(request).map_err(|_| FunnelError(()))
+    }
+}
+
+
+//------------ FunnelError ---------------------------------------------------
+
+#[derive(Debug)]
+pub struct FunnelError(());
+
+impl error::Error for FunnelError {
+    fn description(&self) -> &str {
+        "Cannot wakeup event loop: loop is closed"
+    }
+}
+
+impl fmt::Display for FunnelError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.write_str(error::Error::description(self))
     }

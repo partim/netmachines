@@ -55,7 +55,7 @@ pub mod openssl;
 /// method.
 pub trait Accept: Evented {
     /// The socket type produced by accepting.
-    type Output;
+    type Output: Transport;
 
     /// Accept a new connection.
     ///
@@ -82,6 +82,15 @@ impl Accept for TcpListener {
 }
 
 
+//------------ Transport ----------------------------------------------------
+
+/// A trait for any transport socket.
+pub trait Transport: Evented {
+    fn take_socket_error(&mut self) -> io::Result<()>;
+    fn blocked(&self) -> Option<Blocked> { None }
+}
+
+
 //------------ ClearStream --------------------------------------------------
 
 /// A trait for unencrypted stream sockets.
@@ -95,10 +104,16 @@ impl Accept for TcpListener {
 /// Note further that if reading or writing of non-empty buffers return
 /// `Ok(0)`, the other side has performed an orderly shutdown of the
 /// socket and it is time to let go.
-pub trait ClearStream: Read + Write + Evented { }
+pub trait ClearStream: Read + Write + Transport { }
 
 
 //--- impl for TcpStream
+
+impl Transport for TcpStream {
+    fn take_socket_error(&mut self) -> io::Result<()> {
+        TcpStream::take_socket_error(self)
+    }
+}
 
 impl ClearStream for TcpStream { }
 
@@ -122,9 +137,7 @@ impl ClearStream for TcpStream { }
 ///
 /// [ClearStream]: trait.ClearStream.html
 /// [TransportHandler]: ../handlers/trait.TransportHandler.html
-pub trait SecureStream: Read + Write + Evented {
-    /// Returns whether the stream is currently blocked.
-    fn blocked(&self) -> Option<Blocked>;
+pub trait SecureStream: Read + Write + Transport {
 }
 
 
@@ -145,7 +158,7 @@ pub trait SecureStream: Read + Write + Evented {
 /// [ClearStream]: trait.ClearStream.html
 /// [SecureStream]: trait.SecureStream.html
 /// [TransportHandler]: ../handlers/trait.TransportHandler.html
-pub trait HybridStream: Read + Write + Evented {
+pub trait HybridStream: Read + Write + Transport {
     /// Starts the encryption handshake for this socket.
     ///
     /// The actual handshake will happen synchronously, so an `Ok(())`
@@ -162,9 +175,6 @@ pub trait HybridStream: Read + Write + Evented {
     fn connect_secure(&mut self) -> Result<()>;
 
     fn accept_secure(&mut self) -> Result<()>;
-
-    /// Returns whether the stream is currently blocked.
-    fn blocked(&self) -> Option<Blocked>;
 
     /// Returns whether the stream is encrypted.
     fn is_secure(&self) -> bool;
@@ -189,7 +199,7 @@ pub trait HybridStream: Read + Write + Evented {
 /// XXX Should we add the triple of `connect()`, `send()` and `recv()`
 ///     to the trait? Or add a ConnectedDgram trait?
 ///
-pub trait Dgram: Evented {
+pub trait Dgram: Transport {
     /// Attempts to retrieve an incoming message from the socket.
     ///
     /// If there is at least one pending message available and it was
@@ -228,6 +238,12 @@ pub trait Dgram: Evented {
 
 
 //--- impl for UdpSocket
+
+impl Transport for UdpSocket {
+    fn take_socket_error(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
 
 impl Dgram for UdpSocket {
     fn recv_from(&self, buf: &mut [u8])

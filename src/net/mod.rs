@@ -1,4 +1,3 @@
-
 macro_rules! wrapped_machine {
     ($inner:ident, $map:expr) => {
         fn create(seed: Self::Seed, scope: &mut Scope<Self::Context>)
@@ -31,6 +30,7 @@ macro_rules! wrapped_machine {
 pub mod machines;
 pub mod clear;
 
+/*
 #[cfg(feature = "openssl")]
 pub mod openssl;
-
+*/
