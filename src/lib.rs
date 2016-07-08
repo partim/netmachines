@@ -6,6 +6,8 @@ extern crate openssl;
 #[cfg(feature = "security-framework")]
 extern crate security_framework;
 
+mod compose;
+
 pub mod error;
 pub mod handlers;
 pub mod machines;

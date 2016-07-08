@@ -18,8 +18,7 @@ pub struct TcpServer<X, H>(ServerMachine<X, TcpListener, H>)
 impl<X, H: AcceptHandler<TcpStream>> TcpServer<X, H> {
 }
 
-impl<X, H> Machine for TcpServer<X, H>
-           where H: AcceptHandler<TcpStream> {
+impl<X, H: AcceptHandler<TcpStream>> Machine for TcpServer<X, H> {
     type Context = X;
     type Seed = <ServerMachine<X, TcpListener, H> as Machine>::Seed;
 

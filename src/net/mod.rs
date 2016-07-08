@@ -30,7 +30,5 @@ macro_rules! wrapped_machine {
 pub mod machines;
 pub mod clear;
 
-/*
 #[cfg(feature = "openssl")]
 pub mod openssl;
-*/
