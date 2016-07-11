@@ -71,35 +71,58 @@ use netmachines::net::clear::TcpUdpServer;
 //     change all of this when moving to proper config options.
 
 fn main() {
-    TermLogger::new(LogLevelFilter::Trace);
+    TermLogger::init(LogLevelFilter::Debug).unwrap();
 
+    // Create the processor and spawn it off into its own thread.
     let config = Config::from_args();
     let info = UserInfo::from_config(&config).unwrap();
     let (processor, tx) = Processor::new(info);
     let join = thread::spawn(move || processor.run());
 
+    // Create the actual sockets.
     let addr = SocketAddr::new(IpAddr::from_str("0.0.0.0").unwrap(), 8079);
     let tcp = TcpListener::bind(&addr).unwrap();
     let udp = UdpSocket::bound(&addr).unwrap();
 
+    // Create a rotor loop with default config.
     let mut lc = rotor::Loop::new(&rotor::Config::new()).unwrap();
+
+    // When creating a machine, you need the scope. But for that the
+    // underyling rotor bits need to be there, hence the closure.
+    //
+    // The FingerServer has a new function for each of the machine types it
+    // supports. First we create the TCP server machine. It wants a value
+    // of the accept handler, so we create one.
     lc.add_machine_with(|scope| {
         FingerServer::new_tcp(tcp, StreamAccept::new(tx.clone()), scope)
     }).unwrap();
 
+    // ... and the UDP socket. This one needs a value of the seed for the
+    // transport handler it uses (which will be created in the usual way
+    // via its on_create() functions). See the StreamAccept type below for
+    // a discussion of transport seeds.
     lc.add_machine_with(|scope| {
         FingerServer::new_udp(udp, tx.clone(), scope)
     }).unwrap();
 
+    // We only do TLS if netmachines has been built with a TLS implementation.
+    // The cfg attributes only work on item level, so we have to have a
+    // separated function for it.
     add_tls_sockets(&config, &tx, &mut lc);
 
-    println!("Setting up done.");
+    info!("Setting up done.");
     lc.run(()).unwrap();
+
+    // Cleanup. Since we currently don’t handle signals, we probably never
+    // will arrive here.
     drop(tx);
     join.join().unwrap();
 }
 
 
+/// Creates the TLS socket if OpenSSL is included.
+///
+/// Creates a self-signed certificate on the fly.
 #[cfg(feature = "openssl")]
 fn add_tls_sockets(__config: &Config, tx: &RequestSender,
                    lc: &mut rotor::Loop<FingerServer>) {
@@ -128,36 +151,89 @@ fn add_tls_sockets(__config: &Config, tx: &RequestSender,
 }
 
 
+/// Creates the TLS socket if there is no TLS.
+///
+/// Ie., it doesn’t.
 #[cfg(not(feature = "openssl"))]
 fn add_tls_sockets(_config: &Config, _lc: &mut rotor::Loop<FingerServer>) {
 }
 
 
-//============ Network Handlers ==============================================
+//============ Networking ====================================================
 
 //------------ FingerServer --------------------------------------------------
+// 
+// The actual networking state machine is a combination of the states machines
+// for the different transport protocols we support. Luckily, netmachines
+// provides these for the common combinations, so a type alias is good enough.
+//
+// However, the type differs on whether we have a TLS library or not. So,
+// cfg attributes it is.
 
+/// The server type if OpenSSL is enabled.
+///
+/// This is a three-way combination of TLS, TCP, and UDP.
+///
+/// The first type argument is the rotor context type. A value of this type
+/// will be passed into the `run()` call of rotor loop and will then be
+/// available to all machines. We don’t actually need the context, so we use
+/// `()`.
+///
+/// The next three type arguments are the handler types for TLS, TCP, and
+/// UDP, respectively. TLS and TCP want the accept handler that gets called
+/// whenever a new connection arrives. UDP wants a transport handler right
+/// away since there are no connections.
 #[cfg(feature = "openssl")]
 type FingerServer = TlsTcpUdpServer<(), StreamAccept, StreamAccept, 
                                     DgramHandler>;
 
+/// The server type if there is no TLS.
+///
+/// This is just a two-way combination of TCP and UDP.
 #[cfg(not(feature = "openssl"))]
 type FingerServer = TcpUdpServer<(), StreamAccept, DgramHandler>;
 
 
 //------------ StreamAccept --------------------------------------------------
 
+/// The accept handler for stream sockets.
+///
+/// This types stores all information that needs to be passed to each and
+/// every stream transport handler which, in our case, is the sending end
+/// of the request queue.
 #[derive(Clone)]
 struct StreamAccept {
     req_tx: RequestSender
 }
 
 impl StreamAccept {
+    /// Creates a new accept handler value.
     fn new(req_tx: RequestSender) -> Self {
         StreamAccept { req_tx: req_tx }
     }
 }
 
+/// Implementation of the `AcceptHandler` trait.
+///
+/// This trait is used by server machines when accepting incoming
+/// connections.
+///
+/// This happens in two stages. First, the accept handler’s `on_accept()`
+/// method is called. If it returns `None`, the connection is closed again
+/// right away. Otherwise it returns the seed for its transport handler.
+/// This seed is then passed, together with some more information, to the
+/// transport handler’s `on_create()` function.
+///
+/// The reason for this somewhat complex approach is that the underlying
+/// rotor machine hasn’t been created yet when `on_accept()` has been called.
+/// In particular, this means that the notifier for waking up that machine
+/// isn’t available yet. This notifier, however, is necessary in many cases
+/// and transport handler types often want to store it. If you would want to
+/// do that when the transport handler is created in `on_accept()` already,
+/// you’d have to use an `Option<Notifier>` and lots of `unwrap()`s.
+///
+/// If your transport handler type doesn’t need the notifier, you can simply
+/// declare it its own seed and created it directly in `on_accept()`.
 impl<T: Stream> AcceptHandler<T> for StreamAccept {
     type Output = StreamHandler;
 
@@ -169,20 +245,94 @@ impl<T: Stream> AcceptHandler<T> for StreamAccept {
 
 //------------ StreamHandler -------------------------------------------------
 
+/// The transport handler for stream transports.
+///
+/// Stream transports, ie., TCP and TLS connections, only ever process exactly
+/// one finger transaction. They read a single line with a finger request,
+/// process this request, send the response, and close the socket.
+///
+/// In other words, there are three stages of processing: the request stage
+/// where we read a line from the socket and, if we have one, parese a request
+/// from it and send it off to the processor; the await stage where we wait
+/// for the processor to give us an answer; and the response stage where we
+/// send the answer back.
+///
+/// This is best modelled as a algebraic type (aka an enum) with one variant
+/// for each stage. To make things a little more clean, each variant contains
+/// a type of its own that assembles all the information this stage needs and
+/// also implements all the actual processing. The handler type then merely
+/// dispatches to this ‘sub-types.‘
 enum StreamHandler {
     Request(StreamRequest),
     Await(StreamAwait),
     Response(StreamResponse),
 }
 
+/// The transport handler implementation for the stream handler.
+///
+/// Each transport machine has an associated transport handler that performs
+/// the actual work. These handlers are generic over the transport socket
+/// type (the `T` below). When limiting the `T` in your `TransportHandler<T>`
+/// implementation, you should stay as loose as possible. Netmachines
+/// provides a number of socket traits for this purpose. Since our handler
+/// works with all stream sockets, we pick the `Stream` trait. If the
+/// handler would only work for unencrypted streams for some reason, we would
+/// have picked `ClearStream`.
+///
+/// A transport handler has four functions that are mandatory to implement
+/// plus two more for which there are somewhat sane default implementations
+/// that should work for most protocols.
+///
+/// Each of these functions returns what should happen next through the
+/// `Next<Self>` type. This could be waiting for the socket to be ready for
+/// reading (`Next::read()`), writing (`Next::write()`), or both
+/// (`Next::read_or_write()`). It could be to wait for the machine to be
+/// woken up via a notifier (`Next::wait()`). It could also be to close the
+/// underlying socket and end processing (`Next::remove()`).
+///
+/// Each of these options, except for remove, takes a transport handler
+/// value. The idea here is that the current handler is moved into the
+/// functions and, once processing has finished, a new handler is constructed
+/// from the old one somehow which is moved into the `Next<Self>`.
+///
+/// Remove doesn’t take a value because it literally is the end of the world.
 impl<T: Stream> TransportHandler<T> for StreamHandler {
+    /// The seed type.
+    ///
+    /// This type should contain all the information that is necessary to
+    /// construct a new transport handler value. See the discussion of
+    /// `StreamHandler` above as to why introducing this seed type may have
+    /// been a good idea.
     type Seed = RequestSender;
 
+    /// A new transport has been created.
+    ///
+    /// This function receives everything it could possibly want for creating
+    /// a new handler value. The `seed` holds everything passed in from the
+    /// outside world. The `_sock` is a reference to the new socket. Most
+    /// often you won’t need it, but just in cases it is there.
+    ///
+    /// The notifier can be used to wake up the transport machine. This will
+    /// be necessary whenever the handler relies on outside help, much like
+    /// we do here. When we have received a request, we send it to the
+    /// processor and then go to sleep with `Next::wait()`. The machine will
+    /// now remain dormant until `wakeup()` is being called on the notifier.
+    /// It can safely be cloned and send across to other threads.
+    ///
+    /// In our case, we simply defer processing to our first state.
     fn on_create(seed: Self::Seed, _sock: &mut T, notifier: Notifier)
                  -> Next<Self> {
         StreamRequest::new(seed, notifier)
     }
 
+    /// The transport socket may have become readable.
+    ///
+    /// A reference to the socket is passed in for your reading pleasure.
+    /// See `StreamRequest::on_read()` below for a discussion of some
+    /// curious pitfalls.
+    ///
+    /// Since the request stage is the only stage where we actually read,
+    /// we simply return for the other ones with the appropriate intent.
     fn on_read(self, sock: &mut T) -> Next<Self> {
         match self {
             StreamHandler::Request(req) => req.on_read(sock),
@@ -191,6 +341,9 @@ impl<T: Stream> TransportHandler<T> for StreamHandler {
         }
     }
 
+    /// The transport socket may have become writable.
+    ///
+    /// This is like `on_read()` except for writing.
     fn on_write(self, sock: &mut T) -> Next<Self> {
         match self {
             val @ StreamHandler::Request(_) => Next::read(val),
@@ -199,6 +352,11 @@ impl<T: Stream> TransportHandler<T> for StreamHandler {
         }
     }
 
+    /// The machine has been woken up through a notifier.
+    ///
+    /// This happens once for each time `wakeup()` is successfully called on
+    /// a copy of the machine’s notifier. Calls are not limited to when
+    /// `Next::wait()` was returned but can happen at any time.
     fn on_notify(self) -> Next<Self> {
         match self {
             val @ StreamHandler::Request(_) => Next::read(val),
@@ -206,18 +364,57 @@ impl<T: Stream> TransportHandler<T> for StreamHandler {
             val @ StreamHandler::Response(_) => Next::write(val),
         }
     }
+
+    /// An error has occured.
+    ///
+    /// What this error means depends, unsurprisingly, on `err`. Most errors
+    /// relate to something bad having happened to the socket. In this case
+    /// it is probably best to simply return `Next::remove()`.
+    ///
+    /// If the error is `Error::Timeout`, then a timeout happened. You can
+    /// set a timeout by calling `Next`’s `timeout()` function. If no event
+    /// happens before that time has passed, `Error::Timeout` happens instead.
+    ///
+    /// The implementation below is identical to the default implementation
+    /// and given here merely for posterity.
+    fn on_error(self, _err: Error) -> Next<Self> {
+        Next::remove()
+    }
+
+    /// The transport machine has been removed.
+    ///
+    /// This is the last thing that happens in the lifecycle of a transport
+    /// machine. It’s main purpose is to give you a chance to salvage the
+    /// underlying transport socket. Since calling `Next::remove()` does not
+    /// mean the socket has actually been closed, it may still be good and
+    /// you could pass it on somewhere.
+    ///
+    /// But you don’t have to and the default implementation indeed just
+    /// drops everything:
+    fn on_remove(self, _sock: T) { }
 }
 
 
 //--- StreamRequest
 
+/// The request stage of handling a stream transaction.
 struct StreamRequest {
+    /// The sending end of the channel for requests.
     sender: RequestSender,
+
+    /// A notifier to wake ourselves up later.
     notifier: Notifier,
+
+    /// A buffer to store what we have read so far.
     buf: Vec<u8>
 }
 
 impl StreamRequest {
+    /// Creates the next stream handler for the request stage.
+    ///
+    /// Most attributes have to be passed in from the outside. The buffer,
+    /// however, is created anew. We reserve space for one standard-sized
+    /// line which should really be enough.
     fn new(sender: RequestSender, notifier: Notifier) -> Next<StreamHandler> {
         Next::read(
             StreamHandler::Request(
@@ -227,6 +424,25 @@ impl StreamRequest {
         )
     }
 
+    /// The transport socket may have become readable.
+    ///
+    /// As the headline suggests, this event only is an indication that
+    /// reading from the socket may succeed. It is quite possible trying
+    /// to read would actually block the socket. One example is a TLS socket
+    /// that is stuck in a handshake. Another is a spurious event which is
+    /// always possible.
+    ///
+    /// If you use `Read::read()` for reading, there would be an error with
+    /// `ErrorKind::WouldBlock`. Since matching on `io::Error` is a little
+    /// unwieldy, `TryRead::try_read()` is the better choice. It simply
+    /// returns `Ok(None)` which is quite simple to match on.
+    ///
+    /// This is exactly what we do here. If reading succeeds, we try to
+    /// parse out a request and if that succeeds, too, we move on.
+    ///
+    /// If we don’t like what we’ve read, we turn the error into a response
+    /// (which is simply a string with some text) and progress to the
+    /// response stage directly.
     fn on_read<T: Stream>(mut self, sock: &mut T) -> Next<StreamHandler> {
         // XXX This is probably not the smartest way to do this, but what
         //     the hell ...
@@ -250,6 +466,11 @@ impl StreamRequest {
         }
     }
 
+    /// Dispatches a request and moves on to await stage.
+    ///
+    /// The method creates a ‘portal’ for the response and then sends it off
+    /// to the processor. See `Return` for a discussion of how responses are
+    /// returned.
     fn progress(self, request: Request) -> Next<StreamHandler> {
         let store = Arc::new(Mutex::new(None));
         let ret = Return::Stream(store.clone(), self.notifier);
@@ -265,11 +486,14 @@ impl StreamRequest {
 
 //--- StreamAwait
 
+/// The await stage of handling a stream transaction.
 struct StreamAwait {
+    /// A response will mysteriously appear here.
     store: Arc<Mutex<Option<String>>>
 }
 
 impl StreamAwait {
+    /// Creates the initial next stream handler for the await stage.
     fn new(store: Arc<Mutex<Option<String>>>) -> Next<StreamHandler> {
         Next::wait(
             StreamHandler::Await(
@@ -278,6 +502,12 @@ impl StreamAwait {
         )
     }
 
+    /// The machine has been woken up through a notifier.
+    ///
+    /// This happens when the processor has finished its job. We try to
+    /// get the response by replacing whatever is in `self.store` with a
+    /// `None`. If that leads to `Some(_)`thing, then we have a response
+    /// and can move on. Otherwise, we just keep waiting.
     fn on_notify(self) -> Next<StreamHandler> {
         if let Ok(mut lock) = self.store.lock() {
             if let Some(response) = mem::replace(lock.deref_mut(), None) {
@@ -294,11 +524,18 @@ impl StreamAwait {
 
 //--- StreamResponse
 
+/// The response stage of handling a stream transaction.
 struct StreamResponse {
+    /// The response.
+    ///
+    /// This is basically a bytes vector that remembers how much we have
+    /// written already. We need this since TCP may not send all the data
+    /// at once.
     buf: ByteBuf
 }
 
 impl StreamResponse {
+    /// Creates the initial next stream handler for the response stage.
     fn new(bytes: &[u8]) -> Next<StreamHandler> {
         Next::write(
             StreamHandler::Response(
@@ -307,6 +544,14 @@ impl StreamResponse {
         )
     }
 
+    /// The transport socket may have become writable.
+    ///
+    /// Whatever was said for reading in `StreamRequest` above holds for
+    /// writing as well. If we have some data left, we try to send that out,
+    /// advancing the buffer accordingly.
+    ///
+    /// Once our buffer is empty, we close the socket and the machine by
+    /// returning `Next::remove()`. Game over.
     fn on_write<T: Stream>(mut self, sock: &mut T) -> Next<StreamHandler> {
         if self.buf.has_remaining() {
             match sock.try_write(self.buf.bytes()) {
