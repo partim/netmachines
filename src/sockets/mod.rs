@@ -36,7 +36,7 @@
 
 use std::io::{self, Read, Write};
 use std::net::SocketAddr;
-use rotor::mio::Evented;
+use rotor::mio::{Evented, TryRead, TryWrite};
 use rotor::mio::tcp::{TcpListener, TcpStream};
 use rotor::mio::udp::UdpSocket;
 use ::error::Result;
@@ -91,6 +91,11 @@ pub trait Transport: Evented {
 }
 
 
+//------------ Stream -------------------------------------------------------
+
+pub trait Stream: Read + Write + TryRead + TryWrite + Transport { }
+
+
 //------------ ClearStream --------------------------------------------------
 
 /// A trait for unencrypted stream sockets.
@@ -104,7 +109,7 @@ pub trait Transport: Evented {
 /// Note further that if reading or writing of non-empty buffers return
 /// `Ok(0)`, the other side has performed an orderly shutdown of the
 /// socket and it is time to let go.
-pub trait ClearStream: Read + Write + Transport { }
+pub trait ClearStream: Stream { }
 
 
 //--- impl for TcpStream
@@ -114,6 +119,8 @@ impl Transport for TcpStream {
         TcpStream::take_socket_error(self)
     }
 }
+
+impl Stream for TcpStream { }
 
 impl ClearStream for TcpStream { }
 
@@ -137,7 +144,7 @@ impl ClearStream for TcpStream { }
 ///
 /// [ClearStream]: trait.ClearStream.html
 /// [TransportHandler]: ../handlers/trait.TransportHandler.html
-pub trait SecureStream: Read + Write + Transport {
+pub trait SecureStream: Stream {
 }
 
 

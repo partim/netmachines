@@ -5,9 +5,9 @@ use rotor::{EventSet, GenericScope, Machine, PollOpt, Response, Scope, Void};
 use ::error::Error;
 use ::handlers::{AcceptHandler, RequestHandler, TransportHandler};
 use ::machines::RequestMachine;
-use ::next::{Intent, Interest, Next};
-use ::sockets::{Accept, Transport};
-use ::sync::{Receiver, Funnel, ctrl_channel};
+use ::next::Intent;
+use ::sockets::{Accept, Blocked, Transport};
+use ::sync::Sender;
 use ::utils::ResponseExt;
 
 
@@ -17,50 +17,57 @@ pub struct TransportMachine<X, T: Transport, H: TransportHandler<T>> {
     sock: T,
     handler: H,
     intent: Intent,
-    rx: Receiver<Next>,
     marker: PhantomData<X>
 }
 
 impl<X, T: Transport, H: TransportHandler<T>> TransportMachine<X, T, H> {
-    fn new(sock: T, handler: H, rx: Receiver<Next>) -> Self {
+    pub fn new<S: GenericScope>(mut sock: T, seed: H::Seed, scope: &mut S)
+                                -> Response<Self, Void> {
+        let next = H::on_create(seed, &mut sock, scope.notifier());
+        if let Some((intent, handler)) = Intent::new(next, scope) {
+            let conn = TransportMachine::make(sock, handler, intent);
+            match scope.register(&conn.sock, conn.intent.events(),
+                                 PollOpt::level()) {
+                Ok(_) => { }
+                Err(err) => return Response::error(err.into())
+            }
+            conn.response()
+        }
+        else {
+            Response::done()
+        }
+    }
+}
+
+impl<X, T: Transport, H: TransportHandler<T>> TransportMachine<X, T, H> {
+    fn make(sock: T, handler: H, intent: Intent) -> Self {
         TransportMachine {
             sock: sock,
             handler: handler,
-            intent: Intent::new(),
-            rx: rx,
+            intent: intent,
             marker: PhantomData
         }
     }
 
-    fn merge(&mut self, next: Next, scope: &mut Scope<X>) {
-        self.intent = self.intent.merge(next, scope)
-    }
-
     fn next<S>(self, scope: &mut Scope<X>) -> Response<Self, S> {
-        if let Some(events) = self.intent.events() {
-            match scope.reregister(&self.sock, events, PollOpt::level()) {
-                Ok(_) => { }
-                Err(err) => return Response::error(err.into())
-            }
+        let events = match self.sock.blocked() {
+            Some(Blocked::Read) => EventSet::readable(),
+            Some(Blocked::Write) => EventSet::writable(),
+            None => self.intent.events()
+        };
+        match scope.reregister(&self.sock, events, PollOpt::level()) {
+            Ok(_) => { }
+            Err(err) => return Response::error(err.into())
         }
-        self.response(scope)
+        self.response()
     }
 
-    fn response<S>(self, scope: &mut Scope<X>) -> Response<Self, S> {
-        match self.intent.interest() {
-            Interest::Remove => {
-                let _ = scope.deregister(&self.sock);
-                self.handler.on_remove(self.sock);
-                Response::done()
-            }
-            _ => {
-                if let Some(deadline) = self.intent.deadline() {
-                    Response::ok(self).deadline(deadline)
-                }
-                else {
-                    Response::ok(self)
-                }
-            }
+    fn response<S>(self) -> Response<Self, S> {
+        if let Some(deadline) = self.intent.deadline() {
+            Response::ok(self).deadline(deadline)
+        }
+        else {
+            Response::ok(self)
         }
     }
 }
@@ -73,44 +80,55 @@ impl<X, T, H> Machine for TransportMachine<X, T, H>
     type Context = X;
     type Seed = (T, H::Seed);
 
-    fn create(mut seed: Self::Seed, scope: &mut Scope<X>)
+    fn create(seed: Self::Seed, scope: &mut Scope<X>)
               -> Response<Self, Void> {
-        let (tx, rx) = ctrl_channel(scope.notifier());
-        let mut handler = H::on_create(seed.1, &mut seed.0, tx);
-        let next = handler.on_start();
-        let mut conn = TransportMachine::new(seed.0, handler, rx);
-        conn.merge(next, scope);
-        if let Some(events) = conn.intent.events() {
-            match scope.register(&conn.sock, events, PollOpt::level()) {
-                Ok(_) => { }
-                Err(err) => return Response::error(err.into())
-            }
-        }
-        conn.response(scope)
+        TransportMachine::new(seed.0, seed.1, scope)
     }
 
     fn ready(mut self, events: EventSet, scope: &mut Scope<X>)
                 -> Response<Self, Self::Seed> {
         if events.is_error() {
-            match self.sock.take_socket_error() {
-                Ok(_) => { }
-                Err(err) => {
-                    let next = self.handler.on_error(err.into());
-                    self.merge(next, scope);
-                    return self.next(scope);
+            if let Err(err) = self.sock.take_socket_error() {
+                let next = self.handler.on_error(err.into());
+                if let Some((intent, handler)) = self.intent.merge(next,
+                                                                   scope) {
+                    return TransportMachine::make(self.sock, handler, intent)
+                                            .next(scope);
+                }
+                else {
+                    return Response::done()
                 }
             }
         }
+
+        // If the socket is blocked, we pretent the events are actually those
+        // the handler has requested so the socket is read from or written to
+        // and can become unblocked. (If the handler’s request was for wait,
+        // then what are we doing here in the first place?)
+        let events = if let Some(_) = self.sock.blocked() {
+            self.intent.events()
+        } else {
+            events
+        };
+
         if events.is_readable() {
             let next = self.handler.on_read(&mut self.sock);
-            self.merge(next, scope);
-            if self.intent.is_close() {
+            if let Some((intent, handler)) = self.intent.merge(next, scope) {
+                self = TransportMachine::make(self.sock, handler, intent)
+            }
+            else {
                 return Response::done()
             }
         }
+
         if events.is_writable() {
             let next = self.handler.on_write(&mut self.sock);
-            self.merge(next, scope);
+            if let Some((intent, handler)) = self.intent.merge(next, scope) {
+                self = TransportMachine::make(self.sock, handler, intent)
+            }
+            else {
+                return Response::done()
+            }
         }
         self.next(scope)
     }
@@ -119,19 +137,24 @@ impl<X, T, H> Machine for TransportMachine<X, T, H>
         Response::ok(self)
     }
 
-    fn timeout(mut self, scope: &mut Scope<X>) -> Response<Self, Self::Seed> {
+    fn timeout(self, scope: &mut Scope<X>) -> Response<Self, Self::Seed> {
         let next = self.handler.on_error(Error::Timeout);
-        self.merge(next, scope);
-        self.next(scope)
+        if let Some((intent, handler)) = self.intent.merge(next, scope) {
+            TransportMachine::make(self.sock, handler, intent).next(scope)
+        }
+        else {
+            Response::done()
+        }
     }
 
-    fn wakeup(mut self, scope: &mut Scope<X>) -> Response<Self, Self::Seed> {
-        let mut intent = self.intent;
-        while let Ok(next) = self.rx.try_recv() {
-            intent = intent.merge(next, scope)
-        };
-        self.intent = intent;
-        self.next(scope)
+    fn wakeup(self, scope: &mut Scope<X>) -> Response<Self, Self::Seed> {
+        let next = self.handler.on_notify();
+        if let Some((intent, handler)) = self.intent.merge(next, scope) {
+            TransportMachine::make(self.sock, handler, intent).next(scope)
+        }
+        else {
+            Response::done()
+        }
     }
 }
 
@@ -146,6 +169,16 @@ pub struct ServerMachine<X, A, H>(
 enum ServerInner<A, H, M> {
     Lsnr(A, H),
     Conn(M)
+}
+
+impl<X, A: Accept, H: AcceptHandler<A::Output>> ServerMachine<X, A, H> {
+    pub fn new<S: GenericScope>(sock: A, handler: H, scope: &mut S)
+                                -> Response<Self, Void> {
+        match scope.register(&sock, EventSet::readable(), PollOpt::level()) {
+            Ok(()) => Response::ok(ServerMachine::lsnr(sock, handler)),
+            Err(err) => Response::error(err.into()),
+        }
+    }
 }
 
 impl<X, A: Accept, H: AcceptHandler<A::Output>> ServerMachine<X, A, H> {
@@ -256,7 +289,7 @@ impl<X, T, RH, TH> ClientMachine<X, T, RH, TH>
                          RH: RequestHandler<T>,
                          TH: TransportHandler<T, Seed=RH::Seed> {
     pub fn new<S: GenericScope>(handler: RH, scope: &mut S)
-                                -> (Self, Funnel<RH::Request>) {
+                                -> (Self, Sender<RH::Request>) {
         let (req, f) = RequestMachine::new(handler, scope);
         (ClientMachine::req(req), f)
     }    

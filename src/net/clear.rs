@@ -7,7 +7,7 @@ use super::machines::{ClientMachine, ServerMachine, TransportMachine};
 use ::handlers::{AcceptHandler, RequestHandler, TransportHandler};
 use ::machines::RequestMachine;
 use ::utils::ResponseExt;
-use ::sync::Funnel;
+use ::sync::Sender;
 
 
 //------------ TcpServer -----------------------------------------------------
@@ -16,6 +16,10 @@ pub struct TcpServer<X, H>(ServerMachine<X, TcpListener, H>)
            where H: AcceptHandler<TcpStream>;
 
 impl<X, H: AcceptHandler<TcpStream>> TcpServer<X, H> {
+    pub fn new<S: GenericScope>(sock: TcpListener, handler: H, scope: &mut S)
+                                -> Response<Self, Void> {
+        ServerMachine::new(sock, handler, scope).map_self(TcpServer)
+    }
 }
 
 impl<X, H: AcceptHandler<TcpStream>> Machine for TcpServer<X, H> {
@@ -36,7 +40,7 @@ impl<X, RH, TH> TcpClient<X, RH, TH>
                 where RH: RequestHandler<TcpStream>,
                       TH: TransportHandler<TcpStream, Seed=RH::Seed> {
     pub fn new<S: GenericScope>(handler: RH, scope: &mut S)
-               -> (Self, Funnel<RH::Request>) {
+               -> (Self, Sender<RH::Request>) {
         let (m, f) = ClientMachine::new(handler, scope);
         (TcpClient(m), f)
     }
@@ -58,6 +62,10 @@ pub struct UdpServer<X, H>(TransportMachine<X, UdpSocket, H>)
            where H: TransportHandler<UdpSocket>;
 
 impl<X, H: TransportHandler<UdpSocket>> UdpServer<X, H> {
+    pub fn new<S: GenericScope>(sock: UdpSocket, seed: H::Seed, scope: &mut S)
+                                -> Response<Self, Void> {
+        TransportMachine::new(sock, seed, scope).map_self(UdpServer)
+    }
 }
 
 impl<X, H: TransportHandler<UdpSocket>> Machine for UdpServer<X, H> {
@@ -78,7 +86,7 @@ impl<X, RH, TH> UdpClient<X, RH, TH>
                 where RH: RequestHandler<UdpSocket>,
                       TH: TransportHandler<UdpSocket, Seed=RH::Seed> {
     pub fn new<S: GenericScope>(handler: RH, scope: &mut S)
-               -> (Self, Funnel<RH::Request>) {
+               -> (Self, Sender<RH::Request>) {
         let (m, f) = ClientMachine::new(handler, scope);
         (UdpClient(m), f)
     }
@@ -104,6 +112,17 @@ pub struct TcpUdpServer<X, AH, UH>(Compose2<TcpServer<X, AH>,
 impl<X, AH, UH> TcpUdpServer<X, AH, UH>
                 where AH: AcceptHandler<TcpStream>,
                       UH: TransportHandler<UdpSocket> {
+    pub fn new_tcp<S: GenericScope>(sock: TcpListener, handler: AH,
+                                    scope: &mut S) -> Response<Self, Void> {
+        TcpServer::new(sock, handler, scope)
+                  .map_self(|m| TcpUdpServer(Compose2::A(m)))
+    }
+
+    pub fn new_udp<S: GenericScope>(sock: UdpSocket, seed: UH::Seed,
+                                    scope: &mut S) -> Response<Self, Void> {
+        UdpServer::new(sock, seed, scope)
+                  .map_self(|m| TcpUdpServer(Compose2::B(m)))
+    }
 }
                 
 impl<X, AH, UH> Machine for TcpUdpServer<X, AH, UH>

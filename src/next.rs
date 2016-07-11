@@ -3,33 +3,33 @@
 use std::cmp::min;
 use std::fmt;
 use std::time::Duration;
-use rotor::{EventSet, Scope, Time};
+use rotor::{EventSet, GenericScope, Time};
 
 
 //------------ Next ---------------------------------------------------------
 
 #[must_use]
 #[derive(Clone)]
-pub struct Next {
-    interest: Interest,
+pub struct Next<T> {
+    interest: Option<(Interest, T)>,
     timeout: Option<Duration>,
 }
 
 
-impl Next {
-    fn new(interest: Interest) -> Next {
-        Next { interest: interest, timeout: None }
+impl<T> Next<T> {
+    fn new(interest: Interest, t: T) -> Self {
+        Next { interest: Some((interest, t)), timeout: None }
     }
 
-    pub fn wait() -> Next { Next::new(Interest::Wait) }
+    pub fn wait(t: T) -> Self { Next::new(Interest::Wait, t) }
 
-    pub fn read() -> Next { Next::new(Interest::Read) }
+    pub fn read(t: T) -> Self { Next::new(Interest::Read, t) }
     
-    pub fn write() -> Next { Next::new(Interest::Write) }
+    pub fn write(t: T) -> Self { Next::new(Interest::Write, t) }
     
-    pub fn read_and_write() -> Next { Next::new(Interest::ReadWrite) }
+    pub fn read_and_write(t: T) -> Self { Next::new(Interest::ReadWrite, t) }
     
-    pub fn remove() -> Next { Next::new(Interest::Remove) }
+    pub fn remove() -> Self { Next { interest: None, timeout: None } }
 
     pub fn timeout(mut self, duration: Duration) -> Self {
         self.timeout = Some(duration);
@@ -37,12 +37,27 @@ impl Next {
     }
 }
 
+impl<T> Next<T> {
+    pub fn map<U, F>(self, op: F) -> Next<U>
+           where F: FnOnce(T) -> U {
+        Next {
+            interest: self.interest.map(|(i, t)| (i, op(t))),
+            timeout: self.timeout
+        }
+    }
+}
+
 
 //--- Debug
 
-impl fmt::Debug for Next {
+impl<T> fmt::Debug for Next<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        try!(write!(f, "Next::{:?}", &self.interest));
+        if let Some((interest, _)) = self.interest {
+            try!(write!(f, "Next::{:?}", interest));
+        }
+        else {
+            try!(write!(f, "Next::Remove"));
+        }
         match self.timeout {
             Some(ref d) => write!(f, "({:?})", d),
             None => Ok(())
@@ -54,12 +69,11 @@ impl fmt::Debug for Next {
 //------------ Interest -----------------------------------------------------
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Interest {
+enum Interest {
     Wait,
     Read,
     Write,
-    ReadWrite,
-    Remove
+    ReadWrite
 }
 
 
@@ -67,49 +81,52 @@ pub enum Interest {
 
 #[derive(Clone, Copy, Debug)]
 pub struct Intent {
-    interest: Option<Interest>,
+    interest: Interest,
     deadline: Option<Time>
 }
 
 impl Intent {
-    pub fn new() -> Self {
-        Intent { interest: None, deadline: None }
+    fn make(interest: Interest, deadline: Option<Time>) -> Self {
+        Intent { interest: interest, deadline: deadline }
     }
 
-    pub fn merge<X>(self, other: Next, scope: &mut Scope<X>) -> Intent {
+    pub fn new<T, S: GenericScope>(next: Next<T>, scope: &mut S)
+                                   -> Option<(Self, T)> {
         use self::Interest::*;
 
-        let interest = match self.interest {
-            Some(interest) =>  {
-                match (interest, other.interest) {
-                    (Remove, _) | (_, Remove) => Remove,
-                    (ReadWrite, _) | (_, ReadWrite) | (Read, Write) |
-                    (Write, Read) => {
-                        ReadWrite
-                    }
-                    (Read, _) | (_, Read) => Read,
-                    (Write, _) | (_, Write) => Write,
-                    (Wait, Wait) => Wait
-                }
-            }
-            None => other.interest
-        };
-
-        let deadline = match (self.deadline, other.timeout) {
-            (Some(deadline), Some(timeout)) => {
-                Some(min(deadline, scope.now() + timeout))
-            }
-            (None, Some(timeout)) => Some(scope.now() + timeout),
-            (deadline, None) => deadline
-        };
-        
-        Intent { interest: Some(interest), deadline: deadline }
+        let dl = next.timeout.map(|dur| scope.now() + dur);
+        match next.interest {
+            Some((Wait, t)) => Some((Intent::make(Wait, dl), t)),
+            Some((Read, t)) => Some((Intent::make(Read, dl), t)),
+            Some((Write, t)) => Some((Intent::make(Write, dl), t)),
+            Some((ReadWrite, t)) => Some((Intent::make(ReadWrite, dl), t)),
+            None => None
+        }
     }
 
-    pub fn interest(&self) -> Interest {
-        match self.interest {
-            Some(interest) => interest,
-            None => Interest::Wait
+    pub fn merge<T, S: GenericScope>(self, other: Next<T>, scope: &mut S)
+                                     -> Option<(Self, T)> {
+        use self::Interest::*;
+
+        if let Some((interest, t)) = other.interest {
+            let interest = match (self.interest, interest) {
+                (ReadWrite, _) | (_, ReadWrite) |
+                (Read, Write) | (Write, Read) => ReadWrite,
+                (Read, _) | (_, Read) => Read,
+                (Write, _) | (_, Write) => Write,
+                (Wait, Wait) => Wait
+            };
+            let deadline = match (self.deadline, other.timeout) {
+                (Some(deadline), Some(timeout)) => {
+                    Some(min(deadline, scope.now() + timeout))
+                }
+                (None, Some(timeout)) => Some(scope.now() + timeout),
+                (deadline, None) => deadline
+            };
+            Some((Intent::make(interest, deadline), t))
+        }
+        else {
+            None
         }
     }
 
@@ -117,32 +134,16 @@ impl Intent {
         self.deadline
     }
 
-    pub fn is_close(&self) -> bool {
-        self.interest == Some(Interest::Remove)
-    }
-
     /// Returns the events for self.
-    ///
-    /// Returns `None` for `Next::close()` or `Some(_)` for everything else.
-    pub fn events(&self) -> Option<EventSet> {
+    pub fn events(&self) -> EventSet {
         match self.interest {
-            Some(Interest::Wait) => Some(EventSet::none()),
-            Some(Interest::Read) => Some(EventSet::readable()),
-            Some(Interest::Write) => Some(EventSet::writable()),
-            Some(Interest::ReadWrite) => {
-                Some(EventSet::readable() | EventSet::writable())
+            Interest::Wait => EventSet::none(),
+            Interest::Read => EventSet::readable(),
+            Interest::Write => EventSet::writable(),
+            Interest::ReadWrite => {
+                EventSet::readable() | EventSet::writable()
             }
-            Some(Interest::Remove) => None,
-            None => unreachable!()
         }
-    }
-}
-
-//--- Default
-
-impl Default for Intent {
-    fn default() -> Self {
-        Intent::new()
     }
 }
 

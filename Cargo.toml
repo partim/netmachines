@@ -7,6 +7,10 @@ authors = ["Martin Hoffmann <hn@nvnc.de>"]
 name = "netmachines"
 path = "src/lib.rs"
 
+[[example]]
+name = "pinkyd"
+path = "examples/pinkyd.rs"
+
 [dependencies]
 rotor = "0.6"
 
@@ -17,6 +21,10 @@ optional = true
 [dependencies.security-framework]
 version = "0.1"
 optional = true
+
+[dev-dependencies]
+argparse = "0.2"
+bytes    = "0.3"
 
 [features]
 default = ["ssl"]

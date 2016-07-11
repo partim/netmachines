@@ -1,11 +1,9 @@
 //! Synchronization.
 
-use std::error;
 use std::fmt;
 use std::sync::{Arc, mpsc};
 use std::sync::atomic::{AtomicBool, Ordering};
 use rotor::{Notifier, WakeupError};
-use super::next::Next;
 
 pub use std::sync::mpsc::TryRecvError;
 
@@ -15,17 +13,6 @@ pub fn channel<T>(notify: Notifier) -> (Sender<T>, Receiver<T>) {
     let awake = Arc::new(AtomicBool::new(false));
     let (tx, rx) = mpsc::channel();
     (Sender::new(awake.clone(), notify, tx), Receiver::new(awake.clone(), rx))
-}
-
-pub fn ctrl_channel(notify: Notifier) -> (Control, Receiver<Next>) {
-    let (tx, rx) = channel(notify);
-    (Control { tx: tx }, rx)
-}
-
-pub fn funnel_channel<R: Send>(notify: Notifier)
-                            -> (Funnel<R>, Receiver<R>) {
-    let (tx, rx) = channel(notify);
-    (Funnel { tx: tx }, rx)
 }
 
 
@@ -51,12 +38,6 @@ impl<T: Send> Sender<T> {
             try!(self.notify.wakeup());
         }
         Ok(())
-    }
-}
-
-impl Sender<Next> {
-    pub fn ctrl(&self) -> Control {
-        Control { tx: self.clone() }
     }
 }
 
@@ -120,70 +101,6 @@ impl<T> From<mpsc::SendError<T>> for SendError<T> {
 impl<T> From<WakeupError> for SendError<T> {
     fn from(_: WakeupError) -> SendError<T> {
         SendError(None)
-    }
-}
-
-
-//------------ Control ------------------------------------------------------
-
-#[derive(Clone, Debug)]
-pub struct Control {
-    tx: Sender<Next>
-}
-
-impl Control {
-    pub fn ready(&self, next: Next) -> Result<(), ControlError> {
-        self.tx.send(next).map_err(|_| ControlError(()))
-    }
-}
-
-
-//------------ ControlError -------------------------------------------------
-
-#[derive(Debug)]
-pub struct ControlError(());
-
-impl error::Error for ControlError {
-    fn description(&self) -> &str {
-        "Cannot wakeup event loop: loop is closed"
-    }
-}
-
-impl fmt::Display for ControlError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.write_str(error::Error::description(self))
-    }
-}
-
-
-//------------ Funnel -------------------------------------------------------
-
-#[derive(Clone, Debug)]
-pub struct Funnel<R: Send> {
-    tx: Sender<R>
-}
-
-impl<R: Send> Funnel<R> {
-    pub fn send(&self, request: R) -> Result<(), FunnelError> {
-        self.tx.send(request).map_err(|_| FunnelError(()))
-    }
-}
-
-
-//------------ FunnelError ---------------------------------------------------
-
-#[derive(Debug)]
-pub struct FunnelError(());
-
-impl error::Error for FunnelError {
-    fn description(&self) -> &str {
-        "Cannot wakeup event loop: loop is closed"
-    }
-}
-
-impl fmt::Display for FunnelError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.write_str(error::Error::description(self))
     }
 }
 

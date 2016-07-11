@@ -3,7 +3,7 @@
 use std::marker::PhantomData;
 use rotor::{GenericScope, EventSet, Machine, Response, Scope, Void};
 use ::handlers::RequestHandler;
-use ::sync::{Funnel, Receiver, TryRecvError, funnel_channel};
+use ::sync::{Receiver, Sender, TryRecvError, channel};
 
 //------------ RequestMachine -----------------------------------------------
 
@@ -15,8 +15,8 @@ pub struct RequestMachine<X, T, H: RequestHandler<T>> {
 
 impl<X, T, H: RequestHandler<T>> RequestMachine<X, T, H> {
     pub fn new<S: GenericScope>(handler: H, scope: &mut S)
-                                -> (Self, Funnel<H::Request>) {
-        let (tx, rx) = funnel_channel(scope.notifier());
+                                -> (Self, Sender<H::Request>) {
+        let (tx, rx) = channel(scope.notifier());
         (RequestMachine { handler: handler, rx: rx, marker: PhantomData },
          tx)
     }

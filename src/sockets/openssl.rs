@@ -7,7 +7,7 @@ use openssl::ssl::{self, SslContext, SslStream};
 use rotor::{Evented, EventSet, PollOpt};
 use rotor::mio::{Selector, Token};
 use rotor::mio::tcp::{TcpListener, TcpStream};
-use super::{Accept, Blocked, HybridStream, SecureStream, Transport};
+use super::{Accept, Blocked, HybridStream, SecureStream, Stream, Transport};
 use ::error::Result;
 
 
@@ -94,6 +94,8 @@ impl TlsStream {
 }
 
 impl SecureStream for TlsStream { }
+
+impl Stream for TlsStream { }
 
 impl io::Read for TlsStream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
