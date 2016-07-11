@@ -11,7 +11,7 @@
 //! # Server Architecture
 //!
 //! In order to demonstrate some inter-thread communication, the architecture
-//! is a little more elaborate than strictly necessary. There are two thread:
+//! is a little more involved than strictly necessary. There are two threads:
 //! the networking thread which runs the rotor loop, and the query thread
 //! which processes queries, creates answers, and hands them back to the
 //! requestor.
@@ -23,8 +23,9 @@
 //! as the information printed for them. It consists of sections, one section
 //! per user. Sections are separated by lines consisting only of three hash
 //! signs: `###` and optional trailing white space. Each section starts with
-//! the name of the user as the first line, possibly surrounded by white
-//! space. All following lines are treated as the user’s information.
+//! the name of the user as the first line. The first white space-separated
+//! word of that line is the username, the rest is the full name of the user.
+//! All following lines are treated as the user’s information.
 //!
 //! [RFC 1288]: https://tools.ietf.org/html/rfc1288
 
@@ -35,7 +36,8 @@ extern crate simplelog;
 extern crate netmachines;
 extern crate rotor;
 
-use std::collections::HashMap;
+use std::cmp::max;
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io;
 use std::mem;
@@ -469,9 +471,9 @@ impl Processor {
             let _ = request.whois; // We don’t actually support whois. Haha.
             ret.send(match request.user {
                 Some(user) => {
-                    match self.info.get(&user) {
+                    match self.info.user_info(&user) {
                         Some(res) => res,
-                        None => "No such user.".into()
+                        None => "No such user.\r\n".into()
                     }
                 }
                 None => self.info.user_list()
@@ -521,11 +523,14 @@ impl Config {
 //------------ UserInfo ------------------------------------------------------
 
 /// Collection of all the user information.
-struct UserInfo(HashMap<String, String>);
+struct UserInfo { 
+    map: BTreeMap<String, (Option<String>, String)>,
+    max_user_len: usize
+}
 
 impl UserInfo {
     fn new() -> Self {
-        UserInfo(HashMap::new())
+        UserInfo { map: BTreeMap::new(), max_user_len: 0 }
     }
 
     fn from_config(config: &Config) -> io::Result<Self> {
@@ -539,14 +544,21 @@ impl UserInfo {
         Ok(build.done())
     }
 
-    fn get(&self, user: &str) -> Option<String> {
-        self.0.get(user).map(|res| res.clone())
+    fn user_info(&self, user: &str) -> Option<String> {
+        self.map.get(user).map(|res| res.1.clone())
     }
 
     fn user_list(&self) -> String {
         let mut res = String::new();
-        for key in self.0.keys() {
+        for (key, value) in self.map.iter() {
             res.push_str(key);
+            for _ in key.len()..self.max_user_len {
+                res.push(' ');
+            }
+            if let Some(ref full) = value.0 {
+                res.push_str("    ");
+                res.push_str(full);
+            }
             res.push_str("\r\n");
         }
         res
@@ -555,8 +567,11 @@ impl UserInfo {
 
 
 const DEFAULT_INFO: &'static str = "
-pinky
+pinky The Pinky Daemon
 At your service!
+###
+thebrain The Brain
+Taking over the world.
 ";
 
 
@@ -572,12 +587,17 @@ struct InfoBuilder {
     /// First string is the user name, second string is the user information
     /// collected so far. If this is `None`, we are either at the start or
     /// right after a `###` line.
-    state: Option<(String, String)>
+    state: Option<(String, Option<String>, String)>
 }
 
 impl InfoBuilder {
     fn new() -> InfoBuilder {
         InfoBuilder { target: UserInfo::new(), state: None }
+    }
+
+    fn add_user(&mut self, user: String, full: Option<String>, info: String) {
+        self.target.max_user_len = max(self.target.max_user_len, user.len());
+        self.target.map.insert(user, (full, info));
     }
 
     fn add_str(&mut self, s: &str) -> io::Result<()> {
@@ -611,16 +631,22 @@ impl InfoBuilder {
         let line = line.trim_right();
         if line == "###" {
             let state = mem::replace(&mut self.state, None);
-            if let Some((user, info)) = state {
-                self.target.0.insert(user, info);
+            if let Some((user, full, info)) = state {
+                self.add_user(user, full, info);
             }
         }
         else {
-            if let Some((_, ref mut info)) = self.state {
+            if let Some((_, _, ref mut info)) = self.state {
                 info.push_str(line);
                 info.push_str("\r\n");
             } else if line.trim() != "" {
-                self.state = Some((line.trim().into(), String::new()));
+                let line = line.trim();
+                let user = line.split_whitespace().next().unwrap();
+                let full = match line[user.len()..].trim() {
+                    "" => None,
+                    val => Some(val.into())
+                };
+                self.state = Some((user.into(), full, String::new()));
             }
         }
         Ok(())
@@ -628,8 +654,8 @@ impl InfoBuilder {
 
     fn adding_done(&mut self) {
         let state = mem::replace(&mut self.state, None);
-        if let Some((user, info)) = state {
-            self.target.0.insert(user, info);
+        if let Some((user, full, info)) = state {
+            self.add_user(user, full, info);
         }
     }
 }
