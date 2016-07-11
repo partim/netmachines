@@ -36,6 +36,9 @@ extern crate simplelog;
 extern crate netmachines;
 extern crate rotor;
 
+#[cfg(feature = "openssl")]
+extern crate openssl;
+
 use std::cmp::max;
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -48,7 +51,6 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use bytes::{Buf, ByteBuf};
 use netmachines::handlers::{AcceptHandler, Notifier, TransportHandler};
-use netmachines::net::clear::TcpUdpServer;
 use netmachines::next::Next;
 use netmachines::sockets::{Dgram, Stream};
 use netmachines::sync::{Receiver, Sender, channel};
@@ -56,8 +58,17 @@ use rotor::mio::tcp::TcpListener;
 use rotor::mio::udp::UdpSocket;
 use simplelog::{TermLogger, LogLevelFilter};
 
+#[cfg(feature = "openssl")]
+use netmachines::net::openssl::TlsTcpUdpServer;
+
+#[cfg(not(feature = "openssl"))]
+use netmachines::net::clear::TcpUdpServer;
+
 
 //============ Main: Start Here ==============================================
+
+// XXX All of this here is preliminary (hence those unwrap() calls). We’ll
+//     change all of this when moving to proper config options.
 
 fn main() {
     TermLogger::new(LogLevelFilter::Trace);
@@ -75,13 +86,50 @@ fn main() {
     lc.add_machine_with(|scope| {
         FingerServer::new_tcp(tcp, StreamAccept::new(tx.clone()), scope)
     }).unwrap();
+
     lc.add_machine_with(|scope| {
         FingerServer::new_udp(udp, tx.clone(), scope)
     }).unwrap();
-    lc.run(()).unwrap();
 
+    add_tls_sockets(&config, &tx, &mut lc);
+
+    println!("Setting up done.");
+    lc.run(()).unwrap();
     drop(tx);
     join.join().unwrap();
+}
+
+
+#[cfg(feature = "openssl")]
+fn add_tls_sockets(__config: &Config, tx: &RequestSender,
+                   lc: &mut rotor::Loop<FingerServer>) {
+    use openssl::x509::X509Generator;
+    use openssl::crypto::hash::Type;
+    use openssl::ssl::{SslContext, SslMethod};
+    use netmachines::sockets::openssl::TlsListener;
+
+    let gen = X509Generator::new()
+            .set_bitlength(2048)
+            .set_valid_period(7)
+            .add_name("CN".to_owned(), "Pinky Daemon Corp.".to_owned())
+            .set_sign_hash(Type::SHA256);
+    let (cert, pkey) = gen.generate().unwrap();
+
+    let mut ctx = SslContext::new(SslMethod::Tlsv1).unwrap();
+    ctx.set_private_key(&pkey).unwrap();
+    ctx.set_certificate(&cert).unwrap();
+   
+    let addr = SocketAddr::new(IpAddr::from_str("0.0.0.0").unwrap(), 8479);
+    let tls = TlsListener::bind(&addr, ctx).unwrap();
+
+    lc.add_machine_with(|scope| {
+        FingerServer::new_tls(tls, StreamAccept::new(tx.clone()), scope)
+    }).unwrap();
+}
+
+
+#[cfg(not(feature = "openssl"))]
+fn add_tls_sockets(_config: &Config, _lc: &mut rotor::Loop<FingerServer>) {
 }
 
 
@@ -89,6 +137,11 @@ fn main() {
 
 //------------ FingerServer --------------------------------------------------
 
+#[cfg(feature = "openssl")]
+type FingerServer = TlsTcpUdpServer<(), StreamAccept, StreamAccept, 
+                                    DgramHandler>;
+
+#[cfg(not(feature = "openssl"))]
 type FingerServer = TcpUdpServer<(), StreamAccept, DgramHandler>;
 
 

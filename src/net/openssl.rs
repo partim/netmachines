@@ -1,7 +1,7 @@
 //! Encrypted and combined machines using OpenSSL.
 
 use rotor::{EventSet, GenericScope, Machine, Response, Scope, Void};
-use rotor::mio::tcp::TcpStream;
+use rotor::mio::tcp::{TcpListener, TcpStream};
 use rotor::mio::udp::UdpSocket;
 use ::sockets::openssl::{TlsListener, TlsStream, StartTlsListener,
                          StartTlsStream};
@@ -20,6 +20,10 @@ pub struct TlsServer<X, H>(ServerMachine<X, TlsListener, H>)
            where H: AcceptHandler<TlsStream>;
 
 impl<X, H: AcceptHandler<TlsStream>> TlsServer<X, H> {
+    pub fn new<S: GenericScope>(sock: TlsListener, handler: H, scope: &mut S)
+                                -> Response<Self, Void> {
+        ServerMachine::new(sock, handler, scope).map_self(TlsServer)
+    }
 }
 
 impl<X, H: AcceptHandler<TlsStream>> Machine for TlsServer<X, H> {
@@ -36,6 +40,10 @@ pub struct StartTlsServer<X, H>(ServerMachine<X, StartTlsListener, H>)
            where H: AcceptHandler<StartTlsStream>;
 
 impl<X, H: AcceptHandler<StartTlsStream>> StartTlsServer<X, H> {
+    pub fn new<S: GenericScope>(sock: StartTlsListener, handler: H,
+                                scope: &mut S) -> Response<Self, Void> {
+        ServerMachine::new(sock, handler, scope).map_self(StartTlsServer)
+    }
 }
 
 impl<X, H: AcceptHandler<StartTlsStream>> Machine for StartTlsServer<X, H> {
@@ -105,6 +113,22 @@ pub struct TlsTcpServer<X, SH, CH>(Compose2<TlsServer<X, SH>,
     where SH: AcceptHandler<TlsStream>,
           CH: AcceptHandler<TcpStream>;
 
+impl<X, SH, CH> TlsTcpServer<X, SH, CH>
+                where SH: AcceptHandler<TlsStream>,
+                      CH: AcceptHandler<TcpStream> {
+    pub fn new_tls<S: GenericScope>(sock: TlsListener, handler: SH,
+                                    scope: &mut S) -> Response<Self, Void> {
+        TlsServer::new(sock, handler, scope)
+                  .map_self(|m| TlsTcpServer((Compose2::A(m))))
+    }
+
+    pub fn new_tcp<S: GenericScope>(sock: TcpListener, handler: CH,
+                                    scope: &mut S) -> Response<Self, Void> {
+        TcpServer::new(sock, handler, scope)
+                  .map_self(|m| TlsTcpServer(Compose2::B(m)))
+    }
+}
+
 impl<X, SH, CH> Machine for TlsTcpServer<X, SH, CH>
                 where SH: AcceptHandler<TlsStream>,
                       CH: AcceptHandler<TcpStream> {
@@ -126,6 +150,17 @@ pub struct TlsUdpServer<X, AH, UH>(Compose2<TlsServer<X, AH>,
 impl<X, AH, UH> TlsUdpServer<X, AH, UH>
                 where AH: AcceptHandler<TlsStream>,
                       UH: TransportHandler<UdpSocket> {
+    pub fn new_tls<S: GenericScope>(sock: TlsListener, handler: AH,
+                                    scope: &mut S) -> Response<Self, Void> {
+        TlsServer::new(sock, handler, scope)
+                  .map_self(|m| TlsUdpServer((Compose2::A(m))))
+    }
+
+    pub fn new_udp<S: GenericScope>(sock: UdpSocket, seed: UH::Seed,
+                                    scope: &mut S) -> Response<Self, Void> {
+        UdpServer::new(sock, seed, scope)
+                  .map_self(|m| TlsUdpServer(Compose2::B(m)))
+    }
 }
                 
 impl<X, AH, UH> Machine for TlsUdpServer<X, AH, UH>
@@ -149,6 +184,17 @@ pub struct StartTlsUdpServer<X, AH, UH>(Compose2<StartTlsServer<X, AH>,
 impl<X, AH, UH> StartTlsUdpServer<X, AH, UH>
                 where AH: AcceptHandler<StartTlsStream>,
                       UH: TransportHandler<UdpSocket> {
+    pub fn new_tls<S: GenericScope>(sock: StartTlsListener, handler: AH,
+                                    scope: &mut S) -> Response<Self, Void> {
+        StartTlsServer::new(sock, handler, scope)
+                       .map_self(|m| StartTlsUdpServer((Compose2::A(m))))
+    }
+
+    pub fn new_udp<S: GenericScope>(sock: UdpSocket, seed: UH::Seed,
+                                    scope: &mut S) -> Response<Self, Void> {
+        UdpServer::new(sock, seed, scope)
+                  .map_self(|m| StartTlsUdpServer(Compose2::B(m)))
+    }
 }
                 
 impl<X, AH, UH> Machine for StartTlsUdpServer<X, AH, UH>
@@ -170,6 +216,29 @@ pub struct TlsTcpUdpServer<X, SH, CH, UH>(Compose3<TlsServer<X, SH>,
     where SH: AcceptHandler<TlsStream>,
           CH: AcceptHandler<TcpStream>,
           UH: TransportHandler<UdpSocket>;
+
+impl<X, SH, CH, UH> TlsTcpUdpServer<X, SH, CH, UH>
+                    where SH: AcceptHandler<TlsStream>,
+                          CH: AcceptHandler<TcpStream>,
+                          UH: TransportHandler<UdpSocket> {
+    pub fn new_tls<S: GenericScope>(sock: TlsListener, handler: SH,
+                                    scope: &mut S) -> Response<Self, Void> {
+        TlsServer::new(sock, handler, scope)
+                  .map_self(|m| TlsTcpUdpServer((Compose3::A(m))))
+    }
+
+    pub fn new_tcp<S: GenericScope>(sock: TcpListener, handler: CH,
+                                    scope: &mut S) -> Response<Self, Void> {
+        TcpServer::new(sock, handler, scope)
+                  .map_self(|m| TlsTcpUdpServer(Compose3::B(m)))
+    }
+
+    pub fn new_udp<S: GenericScope>(sock: UdpSocket, seed: UH::Seed,
+                                    scope: &mut S) -> Response<Self, Void> {
+        UdpServer::new(sock, seed, scope)
+                  .map_self(|m| TlsTcpUdpServer(Compose3::C(m)))
+    }
+}
 
 impl<X, SH, CH, UH> Machine for TlsTcpUdpServer<X, SH, CH, UH>
                     where SH: AcceptHandler<TlsStream>,
