@@ -1,3 +1,4 @@
+#[macro_use] extern crate log;
 extern crate rotor;
 
 #[cfg(feature = "openssl")]

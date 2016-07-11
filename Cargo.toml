@@ -12,6 +12,7 @@ name = "pinkyd"
 path = "examples/pinkyd.rs"
 
 [dependencies]
+log   = "0.3"
 rotor = "0.6"
 
 [dependencies.openssl]
@@ -23,8 +24,9 @@ version = "0.1"
 optional = true
 
 [dev-dependencies]
-argparse = "0.2"
-bytes    = "0.3"
+argparse  = "0.2"
+bytes     = "0.3"
+simplelog = "0.1"
 
 [features]
 default = ["ssl"]

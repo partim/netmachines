@@ -28,8 +28,10 @@
 //!
 //! [RFC 1288]: https://tools.ietf.org/html/rfc1288
 
+#[macro_use] extern crate log;
 extern crate argparse;
 extern crate bytes;
+extern crate simplelog;
 extern crate netmachines;
 extern crate rotor;
 
@@ -50,11 +52,14 @@ use netmachines::sockets::{Dgram, Stream};
 use netmachines::sync::{Receiver, Sender, channel};
 use rotor::mio::tcp::TcpListener;
 use rotor::mio::udp::UdpSocket;
+use simplelog::{TermLogger, LogLevelFilter};
 
 
 //============ Main: Start Here ==============================================
 
 fn main() {
+    TermLogger::new(LogLevelFilter::Trace);
+
     let config = Config::from_args();
     let info = UserInfo::from_config(&config).unwrap();
     let (processor, tx) = Processor::new(info);
@@ -71,6 +76,7 @@ fn main() {
     lc.add_machine_with(|scope| {
         FingerServer::new_udp(udp, tx.clone(), scope)
     }).unwrap();
+    lc.run(()).unwrap();
 
     drop(tx);
     join.join().unwrap();
@@ -81,7 +87,7 @@ fn main() {
 
 //------------ FingerServer --------------------------------------------------
 
-type FingerServer = TcpUdpServer<rotor::Void, StreamAccept, DgramHandler>;
+type FingerServer = TcpUdpServer<(), StreamAccept, DgramHandler>;
 
 
 //------------ StreamAccept --------------------------------------------------
