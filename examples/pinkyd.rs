@@ -45,17 +45,15 @@ use std::fs::File;
 use std::io;
 use std::mem;
 use std::net::{IpAddr, SocketAddr};
-use std::ops::DerefMut;
 use std::str::FromStr;
-use std::sync::{Arc, Mutex};
 use std::thread;
 use bytes::{Buf, ByteBuf};
 use netmachines::error::Error;
 use netmachines::handlers::{AcceptHandler, Notifier, TransportHandler};
 use netmachines::next::Next;
 use netmachines::sockets::{Dgram, Stream};
-use netmachines::sync::{DuctReceiver, DuctSender, Receiver, Sender, duct,
-                        channel};
+use netmachines::sync::{DuctReceiver, DuctSender, GateReceiver, GateSender,
+                        Receiver, Sender, channel, duct, gate};
 use rotor::mio::tcp::TcpListener;
 use rotor::mio::udp::UdpSocket;
 use simplelog::{TermLogger, LogLevelFilter};
@@ -475,14 +473,13 @@ impl StreamRequest {
     /// to the processor. See `Return` for a discussion of how responses are
     /// returned.
     fn progress(self, request: Request) -> Next<StreamHandler> {
-        let store = Arc::new(Mutex::new(None));
-        let ret = Return::Stream(store.clone(), self.notifier);
+        let (tx, rx) = gate(self.notifier);
 
-        if let Err(_) = self.sender.send((request, ret)) {
+        if let Err(_) = self.sender.send((request, Return::Stream(tx))) {
             return StreamResponse::new(b"Service temporarily kaputt.\r\n");
         }
 
-        StreamAwait::new(store)
+        StreamAwait::new(rx)
     }
 }
 
@@ -492,15 +489,15 @@ impl StreamRequest {
 /// The await stage of handling a stream transaction.
 struct StreamAwait {
     /// A response will mysteriously appear here.
-    store: Arc<Mutex<Option<String>>>
+    rx: GateReceiver<String>
 }
 
 impl StreamAwait {
     /// Creates the initial next stream handler for the await stage.
-    fn new(store: Arc<Mutex<Option<String>>>) -> Next<StreamHandler> {
+    fn new(rx: GateReceiver<String>) -> Next<StreamHandler> {
         Next::wait(
             StreamHandler::Await(
-                StreamAwait { store: store }
+                StreamAwait { rx: rx }
             )
         )
     }
@@ -508,19 +505,15 @@ impl StreamAwait {
     /// The machine has been woken up through a notifier.
     ///
     /// This happens when the processor has finished its job. We try to
-    /// get the response by replacing whatever is in `self.store` with a
+    /// get the response by replacing whatever is in `self.rx` with a
     /// `None`. If that leads to `Some(_)`thing, then we have a response
     /// and can move on. Otherwise, we just keep waiting.
     fn on_notify(self) -> Next<StreamHandler> {
-        if let Ok(mut lock) = self.store.lock() {
-            if let Some(response) = mem::replace(lock.deref_mut(), None) {
-                return StreamResponse::new(response.as_bytes())
-            }
+        match self.rx.try_get() {
+            Ok(Some(response)) => StreamResponse::new(response.as_bytes()),
+            Ok(None) => Next::wait(StreamHandler::Await(self)),
+            Err(_) => StreamResponse::new(b"Internal server error.\r\n")
         }
-        else {
-             return StreamResponse::new(b"Internal server error.\r\n")
-        }
-        Next::wait(StreamHandler::Await(self))
     }
 }
 
@@ -728,7 +721,7 @@ impl Request {
 
 enum Return {
     Dgram(DuctSender<(String, SocketAddr)>, SocketAddr),
-    Stream(Arc<Mutex<Option<String>>>, Notifier)
+    Stream(GateSender<String>)
 }
 
 impl Return {
@@ -737,12 +730,8 @@ impl Return {
             Return::Dgram(tx, addr) => {
                 let _ = tx.send((response, addr));
             }
-            Return::Stream(store, notifier) => {
-                if let Ok(mut guard) = store.lock() {
-                    mem::replace(guard.deref_mut(), Some(response));
-                    drop(guard);
-                    notifier.wakeup().ok();
-                }
+            Return::Stream(tx) => {
+                let _ = tx.send(response);
             }
         }
     }
