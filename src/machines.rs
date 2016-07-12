@@ -41,7 +41,7 @@ impl<X, T, H: RequestHandler<T>> Machine for RequestMachine<X, T, H> {
         loop {
             match self.rx.try_recv() {
                 Ok(Some(request)) => {
-                    match self.handler.on_request(request) {
+                    match self.handler.request(request) {
                         Some(seed) => return Response::spawn(self, seed),
                         None => { }
                     }

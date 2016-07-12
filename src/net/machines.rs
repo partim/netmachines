@@ -23,7 +23,7 @@ pub struct TransportMachine<X, T: Transport, H: TransportHandler<T>> {
 impl<X, T: Transport, H: TransportHandler<T>> TransportMachine<X, T, H> {
     pub fn new<S: GenericScope>(mut sock: T, seed: H::Seed, scope: &mut S)
                                 -> Response<Self, Void> {
-        let next = H::on_create(seed, &mut sock, scope.notifier());
+        let next = H::create(seed, &mut sock, scope.notifier());
         if let Some((intent, handler)) = Intent::new(next, scope) {
             let conn = TransportMachine::make(sock, handler, intent);
             match scope.register(&conn.sock, conn.intent.events(),
@@ -89,7 +89,7 @@ impl<X, T, H> Machine for TransportMachine<X, T, H>
                 -> Response<Self, Self::Seed> {
         if events.is_error() {
             if let Err(err) = self.sock.take_socket_error() {
-                let next = self.handler.on_error(err.into());
+                let next = self.handler.error(err.into());
                 if let Some((intent, handler)) = self.intent.merge(next,
                                                                    scope) {
                     return TransportMachine::make(self.sock, handler, intent)
@@ -112,7 +112,7 @@ impl<X, T, H> Machine for TransportMachine<X, T, H>
         };
 
         if events.is_readable() {
-            let next = self.handler.on_read(&mut self.sock);
+            let next = self.handler.readable(&mut self.sock);
             if let Some((intent, handler)) = self.intent.merge(next, scope) {
                 self = TransportMachine::make(self.sock, handler, intent)
             }
@@ -122,7 +122,7 @@ impl<X, T, H> Machine for TransportMachine<X, T, H>
         }
 
         if events.is_writable() {
-            let next = self.handler.on_write(&mut self.sock);
+            let next = self.handler.writable(&mut self.sock);
             if let Some((intent, handler)) = self.intent.merge(next, scope) {
                 self = TransportMachine::make(self.sock, handler, intent)
             }
@@ -138,7 +138,7 @@ impl<X, T, H> Machine for TransportMachine<X, T, H>
     }
 
     fn timeout(self, scope: &mut Scope<X>) -> Response<Self, Self::Seed> {
-        let next = self.handler.on_error(Error::Timeout);
+        let next = self.handler.error(Error::Timeout);
         if let Some((intent, handler)) = self.intent.merge(next, scope) {
             TransportMachine::make(self.sock, handler, intent).next(scope)
         }
@@ -148,7 +148,7 @@ impl<X, T, H> Machine for TransportMachine<X, T, H>
     }
 
     fn wakeup(self, scope: &mut Scope<X>) -> Response<Self, Self::Seed> {
-        let next = self.handler.on_notify();
+        let next = self.handler.wakeup();
         if let Some((intent, handler)) = self.intent.merge(next, scope) {
             TransportMachine::make(self.sock, handler, intent).next(scope)
         }
@@ -195,7 +195,7 @@ impl<X, A: Accept, H: AcceptHandler<A::Output>> ServerMachine<X, A, H> {
               -> Response<Self, <Self as Machine>::Seed> {
         match lsnr.accept() {
             Ok(Some((sock, addr))) => {
-                if let Some(seed) = handler.on_accept(&addr) {
+                if let Some(seed) = handler.accept(&addr) {
                     Response::spawn(ServerMachine::lsnr(lsnr, handler),
                                     (sock, seed))
                 }

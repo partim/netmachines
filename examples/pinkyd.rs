@@ -99,7 +99,7 @@ fn main() {
 
     // ... and the UDP socket. This one needs a value of the seed for the
     // transport handler it uses (which will be created in the usual way
-    // via its on_create() functions). See the StreamAccept type below for
+    // via its create() functions). See the StreamAccept type below for
     // a discussion of transport seeds.
     lc.add_machine_with(|scope| {
         FingerServer::new_udp(udp, tx.clone(), scope)
@@ -218,27 +218,27 @@ impl StreamAccept {
 /// This trait is used by server machines when accepting incoming
 /// connections.
 ///
-/// This happens in two stages. First, the accept handler’s `on_accept()`
+/// This happens in two stages. First, the accept handler’s `accept()`
 /// method is called. If it returns `None`, the connection is closed again
 /// right away. Otherwise it returns the seed for its transport handler.
 /// This seed is then passed, together with some more information, to the
-/// transport handler’s `on_create()` function which creates the actual
+/// transport handler’s `create()` function which creates the actual
 /// transport handler.
 ///
 /// The reason for this somewhat complex approach is that the underlying
-/// rotor machine hasn’t been created yet when `on_accept()` is called.
+/// rotor machine hasn’t been created yet when `accept()` is called.
 /// In particular, this means that the notifier for waking up that machine
 /// isn’t available yet. This notifier, however, is necessary in many cases
 /// and transport handler types often want to store it. If you would want to
-/// do that when the transport handler is created in `on_accept()` already,
+/// do that when the transport handler is created in `accept()` already,
 /// you’d have to use an `Option<Notifier>` and lots of `unwrap()`s.
 ///
 /// If your transport handler type doesn’t need the notifier, you can simply
-/// declare it its own seed and created it directly in `on_accept()`.
+/// declare it its own seed and created it directly in `accept()`.
 impl<T: Stream> AcceptHandler<T> for StreamAccept {
     type Output = StreamHandler;
 
-    fn on_accept(&mut self, _addr: &SocketAddr) -> Option<RequestSender> {
+    fn accept(&mut self, _addr: &SocketAddr) -> Option<RequestSender> {
         Some(self.req_tx.clone())
     }
 }
@@ -321,7 +321,7 @@ impl<T: Stream> TransportHandler<T> for StreamHandler {
     /// It can safely be cloned and send across to other threads.
     ///
     /// In our case, we simply defer processing to our first state.
-    fn on_create(seed: Self::Seed, _sock: &mut T, notifier: Notifier)
+    fn create(seed: Self::Seed, _sock: &mut T, notifier: Notifier)
                  -> Next<Self> {
         StreamRequest::new(seed, notifier)
     }
@@ -329,14 +329,14 @@ impl<T: Stream> TransportHandler<T> for StreamHandler {
     /// The transport socket may have become readable.
     ///
     /// A reference to the socket is passed in for your reading pleasure.
-    /// See `StreamRequest::on_read()` below for a discussion of some
+    /// See `StreamRequest::readble()` below for a discussion of some
     /// curious pitfalls.
     ///
     /// Since the request stage is the only stage where we actually read,
     /// we simply return for the other ones with the appropriate intent.
-    fn on_read(self, sock: &mut T) -> Next<Self> {
+    fn readable(self, sock: &mut T) -> Next<Self> {
         match self {
-            StreamHandler::Request(req) => req.on_read(sock),
+            StreamHandler::Request(req) => req.readable(sock),
             val @ StreamHandler::Await(_) => Next::wait(val),
             val @ StreamHandler::Response(_) => Next::write(val),
         }
@@ -344,12 +344,12 @@ impl<T: Stream> TransportHandler<T> for StreamHandler {
 
     /// The transport socket may have become writable.
     ///
-    /// This is like `on_read()` except for writing.
-    fn on_write(self, sock: &mut T) -> Next<Self> {
+    /// This is like `readable()` except for writing.
+    fn writable(self, sock: &mut T) -> Next<Self> {
         match self {
             val @ StreamHandler::Request(_) => Next::read(val),
             val @ StreamHandler::Await(_) => Next::wait(val),
-            StreamHandler::Response(res) => res.on_write(sock)
+            StreamHandler::Response(res) => res.writable(sock)
         }
     }
 
@@ -358,10 +358,10 @@ impl<T: Stream> TransportHandler<T> for StreamHandler {
     /// This happens once for each time `wakeup()` is successfully called on
     /// a copy of the machine’s notifier. Calls are not limited to when
     /// `Next::wait()` was returned but can happen at any time.
-    fn on_notify(self) -> Next<Self> {
+    fn wakeup(self) -> Next<Self> {
         match self {
             val @ StreamHandler::Request(_) => Next::read(val),
-            StreamHandler::Await(await) => await.on_notify(),
+            StreamHandler::Await(await) => await.wakeup(),
             val @ StreamHandler::Response(_) => Next::write(val),
         }
     }
@@ -378,7 +378,7 @@ impl<T: Stream> TransportHandler<T> for StreamHandler {
     ///
     /// The implementation below is identical to the default implementation
     /// and given here merely for posterity.
-    fn on_error(self, _err: Error) -> Next<Self> {
+    fn error(self, _err: Error) -> Next<Self> {
         Next::remove()
     }
 
@@ -392,7 +392,7 @@ impl<T: Stream> TransportHandler<T> for StreamHandler {
     ///
     /// But you don’t have to and the default implementation indeed just
     /// drops everything:
-    fn on_remove(self, _sock: T) { }
+    fn remove(self, _sock: T) { }
 }
 
 
@@ -444,7 +444,7 @@ impl StreamRequest {
     /// If we don’t like what we’ve read, we turn the error into a response
     /// (which is simply a string with some text) and progress to the
     /// response stage directly.
-    fn on_read<T: Stream>(mut self, sock: &mut T) -> Next<StreamHandler> {
+    fn readable<T: Stream>(mut self, sock: &mut T) -> Next<StreamHandler> {
         // XXX This is probably not the smartest way to do this, but what
         //     the hell ...
         let mut buf = [0u8; 80];
@@ -508,7 +508,7 @@ impl StreamAwait {
     /// get the response by replacing whatever is in `self.rx` with a
     /// `None`. If that leads to `Some(_)`thing, then we have a response
     /// and can move on. Otherwise, we just keep waiting.
-    fn on_notify(self) -> Next<StreamHandler> {
+    fn wakeup(self) -> Next<StreamHandler> {
         match self.rx.try_get() {
             Ok(Some(response)) => StreamResponse::new(response.as_bytes()),
             Ok(None) => Next::wait(StreamHandler::Await(self)),
@@ -548,7 +548,7 @@ impl StreamResponse {
     ///
     /// Once our buffer is empty, we close the socket and the machine by
     /// returning `Next::remove()`. Game over.
-    fn on_write<T: Stream>(mut self, sock: &mut T) -> Next<StreamHandler> {
+    fn writable<T: Stream>(mut self, sock: &mut T) -> Next<StreamHandler> {
         if self.buf.has_remaining() {
             match sock.try_write(self.buf.bytes()) {
                 Ok(Some(len)) => self.buf.advance(len),
@@ -589,13 +589,13 @@ impl DgramHandler {
 impl<T: Dgram> TransportHandler<T> for DgramHandler {
     type Seed = RequestSender;
 
-    fn on_create(seed: Self::Seed, _sock: &mut T, notifier: Notifier)
+    fn create(seed: Self::Seed, _sock: &mut T, notifier: Notifier)
                  -> Next<Self> {
         let (tx, rx) = duct(notifier);
         Next::read(DgramHandler { req_tx: seed, tx: tx, rx: rx, send: None })
     }
 
-    fn on_read(self, sock: &mut T) -> Next<Self> {
+    fn readable(self, sock: &mut T) -> Next<Self> {
         let mut buf = [0u8; 4096];
         let (len, addr) = match sock.recv_from(&mut buf) {
             Ok(None) => return self.next(),
@@ -619,7 +619,7 @@ impl<T: Dgram> TransportHandler<T> for DgramHandler {
         self.next()
     }
 
-    fn on_write(mut self, sock: &mut T) -> Next<Self> {
+    fn writable(mut self, sock: &mut T) -> Next<Self> {
         if let Some((message, addr)) = mem::replace(&mut self.send, None) {
             match sock.send_to(message.as_bytes(), &addr) {
                 Ok(Some(_)) => { }
@@ -640,7 +640,7 @@ impl<T: Dgram> TransportHandler<T> for DgramHandler {
         self.next()
     }
 
-    fn on_notify(mut self) -> Next<Self> {
+    fn wakeup(mut self) -> Next<Self> {
         if let Ok(Some((message, addr))) = self.rx.try_recv() {
             self.send = Some((message, addr));
         }
