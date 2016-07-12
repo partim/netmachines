@@ -7,7 +7,7 @@ use super::machines::{ClientMachine, ServerMachine, TransportMachine};
 use ::handlers::{AcceptHandler, RequestHandler, TransportHandler};
 use ::machines::RequestMachine;
 use ::utils::ResponseExt;
-use ::sync::Sender;
+use ::sync::DuctSender;
 
 
 //------------ TcpServer -----------------------------------------------------
@@ -40,7 +40,7 @@ impl<X, RH, TH> TcpClient<X, RH, TH>
                 where RH: RequestHandler<TcpStream>,
                       TH: TransportHandler<TcpStream, Seed=RH::Seed> {
     pub fn new<S: GenericScope>(handler: RH, scope: &mut S)
-               -> (Self, Sender<RH::Request>) {
+               -> (Self, DuctSender<RH::Request>) {
         let (m, f) = ClientMachine::new(handler, scope);
         (TcpClient(m), f)
     }
@@ -86,7 +86,7 @@ impl<X, RH, TH> UdpClient<X, RH, TH>
                 where RH: RequestHandler<UdpSocket>,
                       TH: TransportHandler<UdpSocket, Seed=RH::Seed> {
     pub fn new<S: GenericScope>(handler: RH, scope: &mut S)
-               -> (Self, Sender<RH::Request>) {
+               -> (Self, DuctSender<RH::Request>) {
         let (m, f) = ClientMachine::new(handler, scope);
         (UdpClient(m), f)
     }

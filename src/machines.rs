@@ -3,20 +3,20 @@
 use std::marker::PhantomData;
 use rotor::{GenericScope, EventSet, Machine, Response, Scope, Void};
 use ::handlers::RequestHandler;
-use ::sync::{Receiver, Sender, TryRecvError, channel};
+use ::sync::{DuctReceiver, DuctSender, duct};
 
 //------------ RequestMachine -----------------------------------------------
 
 pub struct RequestMachine<X, T, H: RequestHandler<T>> {
     handler: H,
-    rx: Receiver<H::Request>,
+    rx: DuctReceiver<H::Request>,
     marker: PhantomData<X>
 }
 
 impl<X, T, H: RequestHandler<T>> RequestMachine<X, T, H> {
     pub fn new<S: GenericScope>(handler: H, scope: &mut S)
-                                -> (Self, Sender<H::Request>) {
-        let (tx, rx) = channel(scope.notifier());
+                                -> (Self, DuctSender<H::Request>) {
+        let (tx, rx) = duct(scope.notifier());
         (RequestMachine { handler: handler, rx: rx, marker: PhantomData },
          tx)
     }
@@ -40,14 +40,14 @@ impl<X, T, H: RequestHandler<T>> Machine for RequestMachine<X, T, H> {
                -> Response<Self, Self::Seed> {
         loop {
             match self.rx.try_recv() {
-                Ok(request) => {
+                Ok(Some(request)) => {
                     match self.handler.on_request(request) {
                         Some(seed) => return Response::spawn(self, seed),
                         None => { }
                     }
                 }
-                Err(TryRecvError::Empty) => return Response::ok(self),
-                Err(TryRecvError::Disconnected) => return Response::done()
+                Ok(None) => return Response::ok(self),
+                Err(_) => return Response::done()
             }
         }
     }

@@ -11,7 +11,7 @@ use ::compose::{Compose2, Compose3};
 use ::handlers::{AcceptHandler, RequestHandler, TransportHandler};
 use ::machines::RequestMachine;
 use ::utils::ResponseExt;
-use ::sync::Sender;
+use ::sync::DuctSender;
 
 
 //------------ TlsServer ----------------------------------------------------
@@ -64,7 +64,7 @@ impl<X, RH, TH> TlsClient<X, RH, TH>
                 where RH: RequestHandler<TlsStream>,
                       TH: TransportHandler<TlsStream, Seed=RH::Seed> {
     pub fn new<S: GenericScope>(handler: RH, scope: &mut S)
-               -> (Self, Sender<RH::Request>) {
+               -> (Self, DuctSender<RH::Request>) {
         let (m, f) = ClientMachine::new(handler, scope);
         (TlsClient(m), f)
     }
@@ -90,7 +90,7 @@ impl<X, RH, TH> StartTlsClient<X, RH, TH>
                 where RH: RequestHandler<StartTlsStream>,
                       TH: TransportHandler<StartTlsStream, Seed=RH::Seed> {
     pub fn new<S: GenericScope>(handler: RH, scope: &mut S)
-               -> (Self, Sender<RH::Request>) {
+               -> (Self, DuctSender<RH::Request>) {
         let (m, f) = ClientMachine::new(handler, scope);
         (StartTlsClient(m), f)
     }

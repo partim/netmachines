@@ -7,7 +7,7 @@ use ::handlers::{AcceptHandler, RequestHandler, TransportHandler};
 use ::machines::RequestMachine;
 use ::next::Intent;
 use ::sockets::{Accept, Blocked, Transport};
-use ::sync::Sender;
+use ::sync::DuctSender;
 use ::utils::ResponseExt;
 
 
@@ -289,7 +289,7 @@ impl<X, T, RH, TH> ClientMachine<X, T, RH, TH>
                          RH: RequestHandler<T>,
                          TH: TransportHandler<T, Seed=RH::Seed> {
     pub fn new<S: GenericScope>(handler: RH, scope: &mut S)
-                                -> (Self, Sender<RH::Request>) {
+                                -> (Self, DuctSender<RH::Request>) {
         let (req, f) = RequestMachine::new(handler, scope);
         (ClientMachine::req(req), f)
     }    

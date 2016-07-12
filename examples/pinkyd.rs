@@ -47,13 +47,15 @@ use std::mem;
 use std::net::{IpAddr, SocketAddr};
 use std::ops::DerefMut;
 use std::str::FromStr;
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use bytes::{Buf, ByteBuf};
+use netmachines::error::Error;
 use netmachines::handlers::{AcceptHandler, Notifier, TransportHandler};
 use netmachines::next::Next;
 use netmachines::sockets::{Dgram, Stream};
-use netmachines::sync::{Receiver, Sender, channel};
+use netmachines::sync::{DuctReceiver, DuctSender, Receiver, Sender, duct,
+                        channel};
 use rotor::mio::tcp::TcpListener;
 use rotor::mio::udp::UdpSocket;
 use simplelog::{TermLogger, LogLevelFilter};
@@ -107,7 +109,7 @@ fn main() {
 
     // We only do TLS if netmachines has been built with a TLS implementation.
     // The cfg attributes only work on item level, so we have to have a
-    // separated function for it.
+    // separate function for it.
     add_tls_sockets(&config, &tx, &mut lc);
 
     info!("Setting up done.");
@@ -163,7 +165,7 @@ fn add_tls_sockets(_config: &Config, _lc: &mut rotor::Loop<FingerServer>) {
 
 //------------ FingerServer --------------------------------------------------
 // 
-// The actual networking state machine is a combination of the states machines
+// The actual networking state machine is a combination of the state machines
 // for the different transport protocols we support. Luckily, netmachines
 // provides these for the common combinations, so a type alias is good enough.
 //
@@ -198,7 +200,7 @@ type FingerServer = TcpUdpServer<(), StreamAccept, DgramHandler>;
 
 /// The accept handler for stream sockets.
 ///
-/// This types stores all information that needs to be passed to each and
+/// This type stores all information that needs to be passed to each and
 /// every stream transport handler which, in our case, is the sending end
 /// of the request queue.
 #[derive(Clone)]
@@ -222,10 +224,11 @@ impl StreamAccept {
 /// method is called. If it returns `None`, the connection is closed again
 /// right away. Otherwise it returns the seed for its transport handler.
 /// This seed is then passed, together with some more information, to the
-/// transport handler’s `on_create()` function.
+/// transport handler’s `on_create()` function which creates the actual
+/// transport handler.
 ///
 /// The reason for this somewhat complex approach is that the underlying
-/// rotor machine hasn’t been created yet when `on_accept()` has been called.
+/// rotor machine hasn’t been created yet when `on_accept()` is called.
 /// In particular, this means that the notifier for waking up that machine
 /// isn’t available yet. This notifier, however, is necessary in many cases
 /// and transport handler types often want to store it. If you would want to
@@ -574,8 +577,8 @@ impl StreamResponse {
 
 struct DgramHandler {
     req_tx: RequestSender,
-    tx: Sender<(String, SocketAddr)>,
-    rx: Receiver<(String, SocketAddr)>,
+    tx: DuctSender<(String, SocketAddr)>,
+    rx: DuctReceiver<(String, SocketAddr)>,
     send: Option<(String, SocketAddr)>,
 }
 
@@ -595,7 +598,7 @@ impl<T: Dgram> TransportHandler<T> for DgramHandler {
 
     fn on_create(seed: Self::Seed, _sock: &mut T, notifier: Notifier)
                  -> Next<Self> {
-        let (tx, rx) = channel(notifier);
+        let (tx, rx) = duct(notifier);
         Next::read(DgramHandler { req_tx: seed, tx: tx, rx: rx, send: None })
     }
 
@@ -631,7 +634,7 @@ impl<T: Dgram> TransportHandler<T> for DgramHandler {
                 Err(_) => return Next::remove()
             }
         }
-        while let Ok((message, addr)) = self.rx.try_recv() {
+        while let Ok(Some((message, addr))) = self.rx.try_recv() {
             match sock.send_to(message.as_bytes(), &addr) {
                 Ok(Some(_)) => { }
                 Ok(None) => {
@@ -645,7 +648,7 @@ impl<T: Dgram> TransportHandler<T> for DgramHandler {
     }
 
     fn on_notify(mut self) -> Next<Self> {
-        if let Ok((message, addr)) = self.rx.try_recv() {
+        if let Ok(Some((message, addr))) = self.rx.try_recv() {
             self.send = Some((message, addr));
         }
         self.next()
@@ -724,7 +727,7 @@ impl Request {
 //------------ Return -------------------------------------------------------
 
 enum Return {
-    Dgram(Sender<(String, SocketAddr)>, SocketAddr),
+    Dgram(DuctSender<(String, SocketAddr)>, SocketAddr),
     Stream(Arc<Mutex<Option<String>>>, Notifier)
 }
 
@@ -748,19 +751,19 @@ impl Return {
 
 //------------ RequestSender -------------------------------------------------
 
-type RequestSender = mpsc::Sender<(Request, Return)>;
+type RequestSender = Sender<(Request, Return)>;
 
 
 //------------ Processor -----------------------------------------------------
 
 struct Processor {
     info: UserInfo,
-    tasks: mpsc::Receiver<(Request, Return)>
+    tasks: Receiver<(Request, Return)>
 }
 
 impl Processor {
     fn new(info: UserInfo) -> (Self, RequestSender) {
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = channel();
         (Processor { info: info, tasks: rx }, tx)
     }
 
