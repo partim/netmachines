@@ -1,14 +1,170 @@
 //! Unencrypted machines.
 
+use std::marker::PhantomData;
+use std::net::SocketAddr;
 use rotor::{Compose2, EventSet, GenericScope, Machine, Response, Scope, Void};
 use rotor::mio::tcp::{TcpListener, TcpStream};
 use rotor::mio::udp::UdpSocket;
-use super::machines::{ClientMachine, ServerMachine, TransportMachine};
+use super::machines::{ServerMachine, TransportMachine};
 use ::handlers::{AcceptHandler, RequestHandler, TransportHandler};
-use ::machines::RequestMachine;
+use ::machines::{RequestMachine, SeedFactory, TranslateError};
 use ::utils::ResponseExt;
 use ::sync::DuctSender;
 
+
+//============ Transport Machines ============================================
+
+//------------ TcpTransport --------------------------------------------------
+
+pub struct TcpTransport<X, H>(TransportMachine<X, TcpStream, H>)
+           where H: TransportHandler<TcpStream>;
+
+impl<X, H: TransportHandler<TcpStream>> TcpTransport<X, H> {
+    pub fn new<S: GenericScope>(sock: TcpStream, seed: H::Seed,
+                                scope: &mut S) -> Response<Self, Void> {
+        TransportMachine::new(sock, seed, scope).map_self(TcpTransport)
+    }
+}
+
+impl<X, H: TransportHandler<TcpStream>> Machine for TcpTransport<X, H> {
+    wrapped_machine!(X, (TcpStream, H::Seed),
+                     TransportMachine, TcpTransport);
+}
+
+
+//------------ UdpTransport -------------------------------------------------
+
+pub struct UdpTransport<X, H>(TransportMachine<X, UdpSocket, H>)
+           where H: TransportHandler<UdpSocket>;
+
+impl<X, H: TransportHandler<UdpSocket>> UdpTransport<X, H> {
+    pub fn new<S: GenericScope>(sock: UdpSocket, seed: H::Seed,
+                                scope: &mut S) -> Response<Self, Void> {
+        TransportMachine::new(sock, seed, scope).map_self(UdpTransport)
+    }
+}
+
+impl<X, H: TransportHandler<UdpSocket>> Machine for UdpTransport<X, H> {
+    wrapped_machine!(X, (UdpSocket, H::Seed),
+                     TransportMachine, UdpTransport);
+}
+
+
+//------------ TcpUdpTransport -----------------------------------------------
+
+pub struct TcpUdpTransport<X, TH, UH>(TcpUdp<TcpTransport<X, TH>,
+                                               UdpTransport<X, UH>>)
+           where TH: TransportHandler<TcpStream>,
+                 UH: TransportHandler<UdpSocket>;
+
+impl<X, TH, UH> TcpUdpTransport<X, TH, UH>
+                where TH: TransportHandler<TcpStream>,
+                      UH: TransportHandler<UdpSocket> {
+    pub fn new_tcp<S: GenericScope>(sock: TcpStream, seed: TH::Seed,
+                                    scope: &mut S) -> Response<Self, Void> {
+        TcpTransport::new(sock, seed, scope).map_self(TcpUdpTransport::from)
+    }
+
+    pub fn new_udp<S: GenericScope>(sock: UdpSocket, seed: UH::Seed,
+                                    scope: &mut S) -> Response<Self, Void> {
+        UdpTransport::new(sock, seed, scope).map_self(TcpUdpTransport::from)
+    }
+}
+
+
+//--- From
+
+impl<X, TH, UH> From<TcpTransport<X, TH>> for TcpUdpTransport<X, TH, UH>
+                where TH: TransportHandler<TcpStream>,
+                      UH: TransportHandler<UdpSocket> {
+    fn from(tcp: TcpTransport<X, TH>) -> Self {
+        TcpUdpTransport(TcpUdp::Tcp(tcp))
+    }
+}
+
+impl<X, TH, UH> From<UdpTransport<X, UH>> for TcpUdpTransport<X, TH, UH>
+                where TH: TransportHandler<TcpStream>,
+                      UH: TransportHandler<UdpSocket> {
+    fn from(udp: UdpTransport<X, UH>) -> Self {
+        TcpUdpTransport(TcpUdp::Udp(udp))
+    }
+}
+
+
+//--- Machine
+
+impl<X, TH, UH> Machine for TcpUdpTransport<X, TH, UH>
+                where TH: TransportHandler<TcpStream>,
+                      UH: TransportHandler<UdpSocket> {
+    type Context = X;
+    type Seed = TcpUdp<(TcpStream, TH::Seed), (UdpSocket, UH::Seed)>;
+
+    fn create(seed: Self::Seed, scope: &mut Scope<X>)
+              -> Response<Self, Void> {
+        match seed {
+            TcpUdp::Tcp(seed) => {
+                TcpTransport::create(seed, scope)
+                             .map_self(TcpUdpTransport::from)
+            }
+            TcpUdp::Udp(seed) => {
+                UdpTransport::create(seed, scope)
+                             .map_self(TcpUdpTransport::from)
+            }
+        }
+    }
+
+    fn ready(self, events: EventSet, scope: &mut Scope<X>)
+             -> Response<Self, Self::Seed> {
+        match self.0 {
+            TcpUdp::Tcp(tcp) => {
+                tcp.ready(events, scope)
+                    .map(TcpUdpTransport::from, TcpUdp::Tcp)
+            }
+            TcpUdp::Udp(udp) => {
+                udp.ready(events, scope)
+                    .map(TcpUdpTransport::from, TcpUdp::Udp)
+            }
+        }
+    }
+
+    fn spawned(self, scope: &mut Scope<X>) -> Response<Self, Self::Seed> {
+        match self.0 {
+            TcpUdp::Tcp(tcp) => {
+                tcp.spawned(scope).map(TcpUdpTransport::from, TcpUdp::Tcp)
+            }
+            TcpUdp::Udp(udp) => {
+                udp.spawned(scope).map(TcpUdpTransport::from, TcpUdp::Udp)
+            }
+        }
+    }
+
+    fn timeout(self, scope: &mut Scope<Self::Context>)
+               -> Response<Self, Self::Seed> {
+        match self.0 {
+            TcpUdp::Tcp(tcp) => {
+                tcp.timeout(scope).map(TcpUdpTransport::from, TcpUdp::Tcp)
+            }
+            TcpUdp::Udp(udp) => {
+                udp.timeout(scope).map(TcpUdpTransport::from, TcpUdp::Udp)
+            }
+        }
+    }
+
+    fn wakeup(self, scope: &mut Scope<Self::Context>)
+              -> Response<Self, Self::Seed> {
+        match self.0 {
+            TcpUdp::Tcp(tcp) => {
+                tcp.wakeup(scope).map(TcpUdpTransport::from, TcpUdp::Tcp)
+            }
+            TcpUdp::Udp(udp) => {
+                udp.wakeup(scope).map(TcpUdpTransport::from, TcpUdp::Udp)
+            }
+        }
+    }
+}
+
+
+//============ Server Machines ===============================================
 
 //------------ TcpServer -----------------------------------------------------
 
@@ -30,32 +186,6 @@ impl<X, H: AcceptHandler<TcpStream>> Machine for TcpServer<X, H> {
 }
 
 
-//------------ TcpClient ----------------------------------------------------
-
-pub struct TcpClient<X, RH, TH>(ClientMachine<X, TcpStream, RH, TH>)
-                     where RH: RequestHandler<TcpStream>,
-                           TH: TransportHandler<TcpStream, Seed=RH::Seed>;
-
-impl<X, RH, TH> TcpClient<X, RH, TH>
-                where RH: RequestHandler<TcpStream>,
-                      TH: TransportHandler<TcpStream, Seed=RH::Seed> {
-    pub fn new<S: GenericScope>(handler: RH, scope: &mut S)
-               -> (Self, DuctSender<RH::Request>) {
-        let (m, f) = ClientMachine::new(handler, scope);
-        (TcpClient(m), f)
-    }
-}
-
-impl<X, RH, TH> Machine for TcpClient<X, RH, TH>
-                where RH: RequestHandler<TcpStream>,
-                      TH: TransportHandler<TcpStream, Seed=RH::Seed> {
-    type Context = X;
-    type Seed = <ClientMachine<X, TcpStream, RH, TH> as Machine>::Seed;
-
-    wrapped_machine!(ClientMachine, TcpClient);
-}
-
-
 //------------ UdpServer ----------------------------------------------------
 
 pub struct UdpServer<X, H>(TransportMachine<X, UdpSocket, H>)
@@ -73,32 +203,6 @@ impl<X, H: TransportHandler<UdpSocket>> Machine for UdpServer<X, H> {
     type Seed = (UdpSocket, H::Seed);
 
     wrapped_machine!(TransportMachine, UdpServer);
-}
-
-
-//------------ UdpClient ----------------------------------------------------
-
-pub struct UdpClient<X, RH, TH>(ClientMachine<X, UdpSocket, RH, TH>)
-                     where RH: RequestHandler<UdpSocket>,
-                           TH: TransportHandler<UdpSocket, Seed=RH::Seed>;
-
-impl<X, RH, TH> UdpClient<X, RH, TH>
-                where RH: RequestHandler<UdpSocket>,
-                      TH: TransportHandler<UdpSocket, Seed=RH::Seed> {
-    pub fn new<S: GenericScope>(handler: RH, scope: &mut S)
-               -> (Self, DuctSender<RH::Request>) {
-        let (m, f) = ClientMachine::new(handler, scope);
-        (UdpClient(m), f)
-    }
-}
-
-impl<X, RH, TH> Machine for UdpClient<X, RH, TH>
-                where RH: RequestHandler<UdpSocket>,
-                      TH: TransportHandler<UdpSocket, Seed=RH::Seed> {
-    type Context = X;
-    type Seed = <ClientMachine<X, UdpSocket, RH, TH> as Machine>::Seed;
-
-    wrapped_machine!(ClientMachine, UdpClient);
 }
 
 
@@ -136,135 +240,183 @@ impl<X, AH, UH> Machine for TcpUdpServer<X, AH, UH>
 }
 
 
-//------------ TcpUdpClient -------------------------------------------------
+//============ Client Machines ===============================================
 
-pub struct TcpUdpClient<X, RH, TH, UH>(
-    RTU<RequestMachine<X, TcpOrUdp, RH>,
-        TransportMachine<X, TcpStream, TH>,
-        TransportMachine<X, UdpSocket, UH>>)
-    where RH: RequestHandler<TcpOrUdp>,
-          TH: TransportHandler<TcpStream, Seed=RH::Seed>,
-          UH: TransportHandler<UdpSocket, Seed=RH::Seed>;
+//------------ TcpClient ----------------------------------------------------
 
-enum RTU<R, T, U> {
-    Req(R),
-    Tcp(T),
-    Udp(U)
+pub struct TcpClient<X, RH, TH>(RequestMachine<X, TcpTransport<X, TH>, RH,
+                                               TcpFactory<TH::Seed>>)
+    where RH: RequestHandler<Output=(SocketAddr, TH::Seed)>,
+          TH: TransportHandler<TcpStream>;
+
+
+impl<X, RH, TH> TcpClient<X, RH, TH>
+                where RH: RequestHandler<Output=(SocketAddr, TH::Seed)>,
+                      TH: TransportHandler<TcpStream> {
+    pub fn new<S>(handler: RH, scope: &mut S)
+                  -> (Response<Self, Void>, DuctSender<RH::Request>)
+               where S: GenericScope {
+        let (m, tx) = RequestMachine::new(handler, TcpFactory::new(), scope);
+        (m.map_self(TcpClient), tx)
+    }
 }
 
+impl<X, RH, TH> Machine for TcpClient<X, RH, TH>
+                where RH: RequestHandler<Output=(SocketAddr, TH::Seed)>,
+                      TH: TransportHandler<TcpStream> {
+    wrapped_machine!(X, (TcpStream, TH::Seed),
+                     RequestMachine, TcpClient);
+}
+
+
+//------------ UdpClient ----------------------------------------------------
+
+pub struct UdpClient<X, RH, TH>(RequestMachine<X, UdpTransport<X, TH>,
+                                               RH, UdpFactory<TH::Seed>>)
+                     where RH: RequestHandler<Output=(SocketAddr, TH::Seed)>,
+                           TH: TransportHandler<UdpSocket>;
+
+impl<X, RH, TH> UdpClient<X, RH, TH>
+                where RH: RequestHandler<Output=(SocketAddr, TH::Seed)>,
+                      TH: TransportHandler<UdpSocket> {
+    pub fn new<S>(handler: RH, scope: &mut S)
+                  -> (Response<Self, Void>, DuctSender<RH::Request>)
+               where S: GenericScope {
+        let (m, tx) = RequestMachine::new(handler, UdpFactory::new(), scope);
+        (m.map_self(UdpClient), tx)
+    }
+}
+
+impl<X, RH, TH> Machine for UdpClient<X, RH, TH>
+                where RH: RequestHandler<Output=(SocketAddr, TH::Seed)>,
+                      TH: TransportHandler<UdpSocket> {
+    type Context = X;
+    type Seed = (UdpSocket, TH::Seed);
+
+    wrapped_machine!(RequestMachine, UdpClient);
+}
+
+
+//------------ TcpUdpClient -------------------------------------------------
+
+pub struct TcpUdpClient<X, RH, TH, UH>(RequestMachine<
+                                               X, TcpUdpTransport<X, TH, UH>,
+                                               RH, TcpUdpFactory<TH::Seed,
+                                                                   UH::Seed>>)
+            where RH: RequestHandler<Output=TcpUdp<(SocketAddr, TH::Seed),
+                                                     (SocketAddr, UH::Seed)>>,
+                  TH: TransportHandler<TcpStream>,
+                  UH: TransportHandler<UdpSocket>;
+
 impl<X, RH, TH, UH> TcpUdpClient<X, RH, TH, UH>
-                    where RH: RequestHandler<TcpOrUdp>,
-                          TH: TransportHandler<TcpStream, Seed=RH::Seed>,
-                          UH: TransportHandler<UdpSocket, Seed=RH::Seed> {
-    fn req(req: RequestMachine<X, TcpOrUdp, RH>) -> Self {
-        TcpUdpClient(RTU::Req(req))
-    }
-
-    fn tcp(tcp: TransportMachine<X, TcpStream, TH>) -> Self {
-        TcpUdpClient(RTU::Tcp(tcp))
-    }
-
-    fn udp(udp: TransportMachine<X, UdpSocket, UH>) -> Self {
-        TcpUdpClient(RTU::Udp(udp))
+            where RH: RequestHandler<Output=TcpUdp<(SocketAddr, TH::Seed),
+                                                     (SocketAddr, UH::Seed)>>,
+                  TH: TransportHandler<TcpStream>,
+                  UH: TransportHandler<UdpSocket> {
+    pub fn new<S>(handler: RH, scope: &mut S)
+                  -> (Response<Self, Void>, DuctSender<RH::Request>)
+               where S: GenericScope {
+        let (m, tx) = RequestMachine::new(handler, TcpUdpFactory::new(),
+                                          scope);
+        (m.map_self(TcpUdpClient), tx)
     }
 }
 
 impl<X, RH, TH, UH> Machine for TcpUdpClient<X, RH, TH, UH>
-                    where RH: RequestHandler<TcpOrUdp>,
-                          TH: TransportHandler<TcpStream, Seed=RH::Seed>,
-                          UH: TransportHandler<UdpSocket, Seed=RH::Seed> {
-    type Context = X;
-    type Seed = (TcpOrUdp, RH::Seed);
+            where RH: RequestHandler<Output=TcpUdp<(SocketAddr, TH::Seed),
+                                                     (SocketAddr, UH::Seed)>>,
+                  TH: TransportHandler<TcpStream>,
+                  UH: TransportHandler<UdpSocket> {
+    wrapped_machine!(X, TcpUdp<(TcpStream, TH::Seed), (UdpSocket, UH::Seed)>,
+                     RequestMachine, TcpUdpClient);
+}
 
-    fn create(seed: Self::Seed, scope: &mut Scope<X>)
-              -> Response<Self, Void> {
-        match seed.0 {
-            TcpOrUdp::Tcp(tcp) => {
-                TransportMachine::create((tcp, seed.1), scope)
-                                 .map_self(TcpUdpClient::tcp)
-            }
-            TcpOrUdp::Udp(udp) => {
-                TransportMachine::create((udp, seed.1), scope)
-                                 .map_self(TcpUdpClient::udp)
-            }
-        }
-    }            
 
-    fn ready(self, events: EventSet, scope: &mut Scope<X>)
-             -> Response<Self, Self::Seed> {
-        match self.0 {
-            RTU::Req(req) => {
-                req.ready(events, scope).map_self(TcpUdpClient::req)
-            }
-            RTU::Tcp(tcp) => {
-                tcp.ready(events, scope).map(TcpUdpClient::tcp,
-                                             TcpOrUdp::tcp)
-            }
-            RTU::Udp(udp) => {
-                udp.ready(events, scope).map(TcpUdpClient::udp, TcpOrUdp::udp)
-            }
+//============ Socket Factories ==============================================
+
+//------------ TcpFactory ----------------------------------------------------
+
+pub struct TcpFactory<S>(PhantomData<S>);
+
+impl<S> TcpFactory<S> {
+    fn new() -> Self { TcpFactory(PhantomData) }
+}
+
+impl<S> SeedFactory<(SocketAddr, S), (TcpStream, S)> for TcpFactory<S> {
+    fn translate(&self, output: (SocketAddr, S))
+                 -> Result<(TcpStream, S), TranslateError<(SocketAddr, S)>> {
+        let (addr, seed) = output;
+        match TcpStream::connect(&addr) {
+            Ok(sock) => Ok((sock, seed)),
+            Err(err) => Err(TranslateError((addr, seed), err.into()))
         }
     }
+}
 
-    fn spawned(self, scope: &mut Scope<X>) -> Response<Self, Self::Seed> {
-        match self.0 {
-            RTU::Req(req) => {
-                req.spawned(scope).map_self(TcpUdpClient::req)
-            }
-            RTU::Tcp(tcp) => {
-                tcp.spawned(scope).map(TcpUdpClient::tcp, TcpOrUdp::tcp)
-            }
-            RTU::Udp(udp) => {
-                udp.spawned(scope).map(TcpUdpClient::udp, TcpOrUdp::udp)
-            }
+
+//------------ UdpFactory ---------------------------------------------------
+
+struct UdpFactory<S>(PhantomData<S>);
+
+impl<S> UdpFactory<S> {
+    fn new() -> Self { UdpFactory(PhantomData) }
+}
+
+impl<S> SeedFactory<(SocketAddr, S), (UdpSocket, S)> for UdpFactory<S> {
+    fn translate(&self, output: (SocketAddr, S))
+                 -> Result<(UdpSocket, S), TranslateError<(SocketAddr, S)>> {
+        let (addr, seed) = output;
+        match UdpSocket::bound(&addr) {
+            Ok(sock) => Ok((sock, seed)),
+            Err(err) => Err(TranslateError((addr, seed), err.into()))
         }
     }
+}
 
-    fn timeout(self, scope: &mut Scope<X>) -> Response<Self, Self::Seed> {
-        match self.0 {
-            RTU::Req(req) => {
-                req.timeout(scope).map_self(TcpUdpClient::req)
-            }
-            RTU::Tcp(tcp) => {
-                tcp.timeout(scope).map(TcpUdpClient::tcp, TcpOrUdp::tcp)
-            }
-            RTU::Udp(udp) => {
-                udp.timeout(scope).map(TcpUdpClient::udp, TcpOrUdp::udp)
-            }
-        }
-    }
 
-    fn wakeup(self, scope: &mut Scope<X>) -> Response<Self, Self::Seed> {
-        match self.0 {
-            RTU::Req(req) => {
-                req.wakeup(scope).map_self(TcpUdpClient::req)
+//------------ TcpUdpFactory ------------------------------------------------
+
+struct TcpUdpFactory<TS, US>(PhantomData<(TS, US)>);
+
+impl<TS, US> TcpUdpFactory<TS, US> {
+    fn new() -> Self { TcpUdpFactory(PhantomData) }
+}
+
+impl<TS, US> SeedFactory<TcpUdp<(SocketAddr, TS), (SocketAddr, US)>,
+                         TcpUdp<(TcpStream, TS), (UdpSocket, US)>>
+             for TcpUdpFactory<TS, US> {
+    fn translate(&self, output: TcpUdp<(SocketAddr, TS), (SocketAddr, US)>)
+                 -> Result<TcpUdp<(TcpStream, TS), (UdpSocket, US)>,
+                           TranslateError<TcpUdp<(SocketAddr, TS),
+                                          (SocketAddr, US)>>> {
+        use self::TcpUdp::*;
+
+        match output {
+            Tcp((addr, seed)) => {
+                match TcpStream::connect(&addr) {
+                    Ok(sock) => Ok(Tcp((sock, seed))),
+                    Err(err) => Err(TranslateError(Tcp((addr, seed)),
+                                                   err.into()))
+                }
             }
-            RTU::Tcp(tcp) => {
-                tcp.wakeup(scope).map(TcpUdpClient::tcp, TcpOrUdp::tcp)
-            }
-            RTU::Udp(udp) => {
-                udp.wakeup(scope).map(TcpUdpClient::udp, TcpOrUdp::udp)
+            Udp((addr, seed)) => {
+                match UdpSocket::bound(&addr) {
+                    Ok(sock) => Ok(Udp((sock, seed))),
+                    Err(err) => Err(TranslateError(Udp((addr, seed)),
+                                                   err.into()))
+                }
             }
         }
     }
 }
 
 
-//------------ TcpOrUdp ------------------------------------------------------
+//============ Composition Types =============================================
 
-pub enum TcpOrUdp {
-    Tcp(TcpStream),
-    Udp(UdpSocket)
-}
+//------------ TcpUdp ------------------------------------------------------
 
-
-impl TcpOrUdp {
-    fn tcp<T>(seed: (TcpStream, T)) -> (Self, T) {
-        (TcpOrUdp::Tcp(seed.0), seed.1)
-    }
-
-    fn udp<T>(seed: (UdpSocket, T)) -> (Self, T) {
-        (TcpOrUdp::Udp(seed.0), seed.1)
-    }
+pub enum TcpUdp<T, U> {
+    Tcp(T),
+    Udp(U)
 }
 

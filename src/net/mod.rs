@@ -24,8 +24,15 @@ macro_rules! wrapped_machine {
                   -> Response<Self, Self::Seed> {
             self.0.wakeup(scope).map_self($map)
         }
+    };
+
+    ($context:ty, $seed:ty, $inner:ident, $map:expr) => {
+        type Context = $context;
+        type Seed = $seed;
+        wrapped_machine!($inner, $map);
     }
 }
+
 
 pub mod machines;
 pub mod clear;

@@ -85,3 +85,4 @@ impl<X, AA, BB, CC> Machine for Compose3<AA, BB, CC>
         }
     }
 }
+

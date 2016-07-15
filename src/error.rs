@@ -1,4 +1,8 @@
-//! Error.
+//! Error and result.
+//!
+//! Currently, netmachines uses a mixture of `std::io::Error` and its own
+//! error type. This hierarchy bears some thinking about, so this is likely
+//! to change.
 
 use std::error;
 use std::fmt;
@@ -8,8 +12,11 @@ use std::result;
 #[cfg(feature = "openssl")]
 use openssl::ssl::error::SslError as OpensslError;
 
+
 //------------ Error --------------------------------------------------------
 
+/// The error type.
+///
 #[derive(Debug)]
 pub enum Error {
     Io(io::Error),
@@ -58,6 +65,7 @@ impl From<OpensslError> for Error {
         }
     }
 }
+
 
 //------------ Result -------------------------------------------------------
 

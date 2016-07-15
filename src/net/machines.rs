@@ -3,11 +3,9 @@
 use std::marker::PhantomData;
 use rotor::{EventSet, GenericScope, Machine, PollOpt, Response, Scope, Void};
 use ::error::Error;
-use ::handlers::{AcceptHandler, RequestHandler, TransportHandler};
-use ::machines::RequestMachine;
+use ::handlers::{AcceptHandler, TransportHandler};
 use ::next::Intent;
 use ::sockets::{Accept, Blocked, Transport};
-use ::sync::DuctSender;
 use ::utils::ResponseExt;
 
 
@@ -264,103 +262,6 @@ impl<X, A, H> Machine for ServerMachine<X, A, H>
             ServerInner::Lsnr(..) => unreachable!("listener can’t wakeup"),
             ServerInner::Conn(conn) => {
                 conn.wakeup(scope).map_self(ServerMachine::conn)
-            }
-        }
-    }
-}
-
-
-//------------ ClientMachine -------------------------------------------------
-
-pub struct ClientMachine<X, T, RH, TH>(
-    ClientInner<RequestMachine<X, T, RH>, TransportMachine<X, T, TH>>,
-    PhantomData<X>)
-           where T: Transport,
-                 RH: RequestHandler<T>,
-                 TH: TransportHandler<T, Seed=RH::Seed>;
-
-enum ClientInner<RM, TM> {
-    Req(RM),
-    Trsp(TM),
-}
-
-impl<X, T, RH, TH> ClientMachine<X, T, RH, TH>
-                   where T: Transport,
-                         RH: RequestHandler<T>,
-                         TH: TransportHandler<T, Seed=RH::Seed> {
-    pub fn new<S: GenericScope>(handler: RH, scope: &mut S)
-                                -> (Self, DuctSender<RH::Request>) {
-        let (req, f) = RequestMachine::new(handler, scope);
-        (ClientMachine::req(req), f)
-    }    
-}
-
-impl<X, T, RH, TH> ClientMachine<X, T, RH, TH>
-                   where T: Transport,
-                         RH: RequestHandler<T>,
-                         TH: TransportHandler<T, Seed=RH::Seed> {
-    fn req(machine: RequestMachine<X, T, RH>) -> Self {
-        ClientMachine(ClientInner::Req(machine), PhantomData)
-    }
-
-    fn trsp(machine: TransportMachine<X, T, TH>) -> Self {
-        ClientMachine(ClientInner::Trsp(machine), PhantomData)
-    }
-}
-
-impl<X, T, RH, TH> Machine for ClientMachine<X, T, RH, TH>
-                   where T: Transport,
-                         RH: RequestHandler<T>,
-                         TH: TransportHandler<T, Seed=RH::Seed> {
-    type Context = X;
-    type Seed = (T, TH::Seed);
-
-    fn create(seed: Self::Seed, scope: &mut Scope<X>)
-              -> Response<Self, Void> {
-        TransportMachine::create(seed, scope).map_self(ClientMachine::trsp)
-    }
-
-    fn ready(self, events: EventSet, scope: &mut Scope<X>)
-             -> Response<Self, Self::Seed> {
-        match self.0 {
-            ClientInner::Req(machine) => {
-                machine.ready(events, scope).map_self(ClientMachine::req)
-            }
-            ClientInner::Trsp(machine) => {
-                machine.ready(events, scope).map_self(ClientMachine::trsp)
-            }
-        }
-    }
-
-    fn spawned(self, scope: &mut Scope<X>) -> Response<Self, Self::Seed> {
-        match self.0 {
-            ClientInner::Req(machine) => {
-                machine.spawned(scope).map_self(ClientMachine::req)
-            }
-            ClientInner::Trsp(machine) => {
-                machine.spawned(scope).map_self(ClientMachine::trsp)
-            }
-        }
-    }
-
-    fn timeout(self, scope: &mut Scope<X>) -> Response<Self, Self::Seed> {
-        match self.0 {
-            ClientInner::Req(machine) => {
-                machine.timeout(scope).map_self(ClientMachine::req)
-            }
-            ClientInner::Trsp(machine) => {
-                machine.timeout(scope).map_self(ClientMachine::trsp)
-            }
-        }
-    }
-
-    fn wakeup(self, scope: &mut Scope<X>) -> Response<Self, Self::Seed> {
-        match self.0 {
-            ClientInner::Req(machine) => {
-                machine.wakeup(scope).map_self(ClientMachine::req)
-            }
-            ClientInner::Trsp(machine) => {
-                machine.wakeup(scope).map_self(ClientMachine::trsp)
             }
         }
     }

@@ -71,6 +71,14 @@ pub struct TlsStream {
 }
 
 impl TlsStream {
+    pub fn connect(addr: &SocketAddr, ctx: &SslContext) -> Result<Self> {
+        let sock = try!(SslStream::connect(ctx,
+                                           try!(TcpStream::connect(addr))));
+        Ok(TlsStream { sock: sock, blocked: None })
+    }
+}
+
+impl TlsStream {
     fn accept(stream: TcpStream, ctx: &SslContext) -> Result<TlsStream> {
         Ok(TlsStream  { sock: try!(SslStream::accept(ctx, stream)),
                         blocked: None })
@@ -207,6 +215,12 @@ pub struct StartTlsStream {
 enum StartTlsSock {
     Clear(TcpStream),
     Secure(SslStream<TcpStream>)
+}
+
+impl StartTlsStream {
+    pub fn connect(addr: &SocketAddr, ctx: SslContext) -> Result<Self> {
+        Ok(StartTlsStream::new(try!(TcpStream::connect(addr)), ctx))
+    }
 }
 
 impl StartTlsStream {

@@ -49,11 +49,12 @@ use std::str::FromStr;
 use std::thread;
 use bytes::{Buf, ByteBuf};
 use netmachines::error::Error;
-use netmachines::handlers::{AcceptHandler, Notifier, TransportHandler};
+use netmachines::handlers::{AcceptHandler, TransportHandler};
 use netmachines::next::Next;
 use netmachines::sockets::{Dgram, Stream};
 use netmachines::sync::{DuctReceiver, DuctSender, GateReceiver, GateSender,
                         Receiver, Sender, channel, duct, gate};
+use rotor::Notifier;
 use rotor::mio::tcp::TcpListener;
 use rotor::mio::udp::UdpSocket;
 use simplelog::{TermLogger, LogLevelFilter};
@@ -568,14 +569,40 @@ impl StreamResponse {
 
 //------------ DgramHandler --------------------------------------------------
 
+/// The transport handler for datagram transports.
+///
+/// With datagram transport such as UDP there are no stages. Instead, for
+/// every message received, we let the processor create a response and send
+/// it back to wherever the message came from.
 struct DgramHandler {
+    /// Where to send requests for processing.
     req_tx: RequestSender,
+
+    /// The sending end of the duct to get responses back.
+    ///
+    /// A duct is a synchronization type that comes with netmachines. It is
+    /// similar to Rust’s own channel except that it is associated with a
+    /// state machine. Every time someone sends an item, this state machine
+    /// is being woken up.
+    ///
+    /// We need to keep the sending end around since we have to pass a clone
+    /// of it to the processor every time we give it a request.
     tx: DuctSender<(String, SocketAddr)>,
+
+    /// The receiving end of the duct to get responses back.
     rx: DuctReceiver<(String, SocketAddr)>,
+
+    /// A response to be send out, if there is one.
     send: Option<(String, SocketAddr)>,
 }
 
 impl DgramHandler {
+    /// Returns the next transport handler.
+    ///
+    /// Most importantly, this helper method determines the socket events we
+    /// are interested in. We are always interested in reading. Whenever we
+    /// have a response to send out, in which case `self.send` is `Some(_)`,
+    /// we also are interested in writing.
     fn next(self) -> Next<Self> {
         if self.send.is_some() {
             Next::read_and_write(self)
@@ -586,6 +613,9 @@ impl DgramHandler {
     }
 }
 
+/// The transport handler implementation for the stream handler.
+///
+/// This should be routine by now.
 impl<T: Dgram> TransportHandler<T> for DgramHandler {
     type Seed = RequestSender;
 

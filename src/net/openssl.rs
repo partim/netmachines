@@ -1,20 +1,290 @@
 //! Encrypted and combined machines using OpenSSL.
 
+use std::marker::PhantomData;
+use std::net::SocketAddr;
+use openssl::ssl::SslContext;
 use rotor::{EventSet, GenericScope, Machine, Response, Scope, Void};
 use rotor::mio::tcp::{TcpListener, TcpStream};
 use rotor::mio::udp::UdpSocket;
 use ::sockets::openssl::{TlsListener, TlsStream, StartTlsListener,
                          StartTlsStream};
-use super::machines::{ClientMachine, ServerMachine, TransportMachine};
-use super::clear::{UdpServer, TcpServer};
+use super::machines::{ServerMachine, TransportMachine};
+use super::clear::{TcpServer, TcpTransport, UdpServer, UdpTransport};
 use ::compose::{Compose2, Compose3};
 use ::handlers::{AcceptHandler, RequestHandler, TransportHandler};
-use ::machines::RequestMachine;
+use ::machines::{RequestMachine, SeedFactory, TranslateError};
 use ::utils::ResponseExt;
 use ::sync::DuctSender;
 
+//============ Transport Machines ============================================
 
-//------------ TlsServer ----------------------------------------------------
+//------------ TlsTransport --------------------------------------------------
+
+pub struct TlsTransport<X, H>(TransportMachine<X, TlsStream, H>)
+           where H: TransportHandler<TlsStream>;
+
+impl<X, H: TransportHandler<TlsStream>> TlsTransport<X, H> {
+    pub fn new<S: GenericScope>(sock: TlsStream, seed: H::Seed,
+                                scope: &mut S) -> Response<Self, Void> {
+        TransportMachine::new(sock, seed, scope).map_self(TlsTransport)
+    }
+}
+
+impl<X, H: TransportHandler<TlsStream>> Machine for TlsTransport<X, H> {
+    wrapped_machine!(X, (TlsStream, H::Seed),
+                     TransportMachine, TlsTransport);
+}
+
+
+//------------ StartTlsTransport ---------------------------------------------
+
+pub struct StartTlsTransport<X, H>(TransportMachine<X, StartTlsStream, H>)
+           where H: TransportHandler<StartTlsStream>;
+
+impl<X, H: TransportHandler<StartTlsStream>> StartTlsTransport<X, H> {
+    pub fn new<S: GenericScope>(sock: StartTlsStream, seed: H::Seed,
+                                scope: &mut S) -> Response<Self, Void> {
+        TransportMachine::new(sock, seed, scope).map_self(StartTlsTransport)
+    }
+}
+
+impl<X, H> Machine for StartTlsTransport<X, H>
+           where H: TransportHandler<StartTlsStream> {
+    wrapped_machine!(X, (StartTlsStream, H::Seed),
+                     TransportMachine, StartTlsTransport);
+}
+
+
+//------------ TlsTcpTransport -----------------------------------------------
+
+pub struct TlsTcpTransport<X, SH, CH>(TlsTcp<TlsTransport<X, SH>,
+                                               TcpTransport<X, CH>>)
+           where SH: TransportHandler<TlsStream>,
+                 CH: TransportHandler<TcpStream>;
+
+impl<X, SH, CH> TlsTcpTransport<X, SH, CH>
+                where SH: TransportHandler<TlsStream>,
+                      CH: TransportHandler<TcpStream> {
+    pub fn new_tls<S: GenericScope>(sock: TlsStream, seed: SH::Seed,
+                                    scope: &mut S) -> Response<Self, Void> {
+        TlsTransport::new(sock, seed, scope).map_self(TlsTcpTransport::from)
+    }
+
+    pub fn new_tcp<S: GenericScope>(sock: TcpStream, seed: CH::Seed,
+                                    scope: &mut S) -> Response<Self, Void> {
+        TcpTransport::new(sock, seed, scope).map_self(TlsTcpTransport::from)
+    }
+}
+
+
+//--- From
+
+impl<X, SH, CH> From<TlsTransport<X, SH>> for TlsTcpTransport<X, SH, CH>
+                where SH: TransportHandler<TlsStream>,
+                      CH: TransportHandler<TcpStream> {
+    fn from(tls: TlsTransport<X, SH>) -> Self {
+        TlsTcpTransport(TlsTcp::Tls(tls))
+    }
+}
+
+impl<X, SH, CH> From<TcpTransport<X, CH>> for TlsTcpTransport<X, SH, CH>
+                where SH: TransportHandler<TlsStream>,
+                      CH: TransportHandler<TcpStream> {
+    fn from(tcp: TcpTransport<X, CH>) -> Self {
+        TlsTcpTransport(TlsTcp::Tcp(tcp))
+    }
+}
+
+
+//--- Machine
+
+impl<X, SH, CH> Machine for TlsTcpTransport<X, SH, CH>
+                where SH: TransportHandler<TlsStream>,
+                      CH: TransportHandler<TcpStream> {
+    type Context = X;
+    type Seed = TlsTcp<<TlsTransport<X, SH> as Machine>::Seed,
+                        <TcpTransport<X, CH> as Machine>::Seed>;
+
+    fn create(seed: Self::Seed, scope: &mut Scope<X>)
+              -> Response<Self, Void> {
+        match seed {
+            TlsTcp::Tls(seed) => {
+                TlsTransport::create(seed, scope)
+                             .map_self(TlsTcpTransport::from)
+            }
+            TlsTcp::Tcp(seed) => {
+                TcpTransport::create(seed, scope)
+                             .map_self(TlsTcpTransport::from)
+            }
+        }
+    }
+
+    fn ready(self, events: EventSet, scope: &mut Scope<X>)
+             -> Response<Self, Self::Seed> {
+        match self.0 {
+            TlsTcp::Tls(tls) => {
+                tls.ready(events, scope)
+                   .map(TlsTcpTransport::from, TlsTcp::Tls)
+            }
+            TlsTcp::Tcp(tcp) => {
+                tcp.ready(events, scope)
+                   .map(TlsTcpTransport::from, TlsTcp::Tcp)
+            }
+        }
+    }
+
+    fn spawned(self, scope: &mut Scope<X>) -> Response<Self, Self::Seed> {
+        match self.0 {
+            TlsTcp::Tls(tls) => {
+                tls.spawned(scope).map(TlsTcpTransport::from, TlsTcp::Tls)
+            }
+            TlsTcp::Tcp(tcp) => {
+                tcp.spawned(scope).map(TlsTcpTransport::from, TlsTcp::Tcp)
+            }
+        }
+    }
+
+    fn timeout(self, scope: &mut Scope<X>) -> Response<Self, Self::Seed> {
+        match self.0 {
+            TlsTcp::Tls(tls) => {
+                tls.timeout(scope).map(TlsTcpTransport::from, TlsTcp::Tls)
+            }
+            TlsTcp::Tcp(tcp) => {
+                tcp.timeout(scope).map(TlsTcpTransport::from, TlsTcp::Tcp)
+            }
+        }
+    }
+    
+    fn wakeup(self, scope: &mut Scope<X>) -> Response<Self, Self::Seed> {
+        match self.0 {
+            TlsTcp::Tls(tls) => {
+                tls.wakeup(scope).map(TlsTcpTransport::from, TlsTcp::Tls)
+            }
+            TlsTcp::Tcp(tcp) => {
+                tcp.wakeup(scope).map(TlsTcpTransport::from, TlsTcp::Tcp)
+            }
+        }
+    }
+}
+
+
+//------------ TlsUdpTransport -----------------------------------------------
+
+pub struct TlsUdpTransport<X, TH, UH>(TlsUdp<TlsTransport<X, TH>,
+                                             UdpTransport<X, UH>>)
+           where TH: TransportHandler<TlsStream>,
+                 UH: TransportHandler<UdpSocket>;
+
+impl<X, TH, UH> TlsUdpTransport<X, TH, UH>
+                where TH: TransportHandler<TlsStream>,
+                      UH: TransportHandler<UdpSocket> {
+    pub fn new_tls<S: GenericScope>(sock: TlsStream, seed: TH::Seed,
+                                    scope: &mut S) -> Response<Self, Void> {
+        TlsTransport::new(sock, seed, scope).map_self(TlsUdpTransport::from)
+    }
+
+    pub fn new_udp<S: GenericScope>(sock: UdpSocket, seed: UH::Seed,
+                                    scope: &mut S) -> Response<Self, Void> {
+        UdpTransport::new(sock, seed, scope).map_self(TlsUdpTransport::from)
+    }
+}
+
+
+//--- From
+
+impl<X, TH, UH> From<TlsTransport<X, TH>> for TlsUdpTransport<X, TH, UH>
+                where TH: TransportHandler<TlsStream>,
+                      UH: TransportHandler<UdpSocket> {
+    fn from(tls: TlsTransport<X, TH>) -> Self {
+        TlsUdpTransport(TlsUdp::Tls(tls))
+    }
+}
+                
+impl<X, TH, UH> From<UdpTransport<X, UH>> for TlsUdpTransport<X, TH, UH>
+                where TH: TransportHandler<TlsStream>,
+                      UH: TransportHandler<UdpSocket> {
+    fn from(udp: UdpTransport<X, UH>) -> Self {
+        TlsUdpTransport(TlsUdp::Udp(udp))
+    }
+}
+
+
+//--- Machine
+
+impl<X, TH, UH> Machine for TlsUdpTransport<X, TH, UH>
+                where TH: TransportHandler<TlsStream>,
+                      UH: TransportHandler<UdpSocket> {
+    type Context = X;
+    type Seed = TlsUdp<(TlsStream, TH::Seed), (UdpSocket, UH::Seed)>;
+
+    fn create(seed: Self::Seed, scope: &mut Scope<X>)
+              -> Response<Self, Void> {
+        match seed {
+            TlsUdp::Tls(seed) => {
+                TlsTransport::create(seed, scope)
+                             .map_self(TlsUdpTransport::from)
+            }
+            TlsUdp::Udp(seed) => {
+                UdpTransport::create(seed, scope)
+                             .map_self(TlsUdpTransport::from)
+            }
+        }
+    }
+
+    fn ready(self, events: EventSet, scope: &mut Scope<X>)
+             -> Response<Self, Self::Seed> {
+        match self.0 {
+            TlsUdp::Tls(tls) => {
+                tls.ready(events, scope)
+                    .map(TlsUdpTransport::from, TlsUdp::Tls)
+            }
+            TlsUdp::Udp(udp) => {
+                udp.ready(events, scope)
+                    .map(TlsUdpTransport::from, TlsUdp::Udp)
+            }
+        }
+    }
+
+    fn spawned(self, scope: &mut Scope<X>) -> Response<Self, Self::Seed> {
+        match self.0 {
+            TlsUdp::Tls(tls) => {
+                tls.spawned(scope).map(TlsUdpTransport::from, TlsUdp::Tls)
+            }
+            TlsUdp::Udp(udp) => {
+                udp.spawned(scope).map(TlsUdpTransport::from, TlsUdp::Udp)
+            }
+        }
+    }
+
+    fn timeout(self, scope: &mut Scope<Self::Context>)
+               -> Response<Self, Self::Seed> {
+        match self.0 {
+            TlsUdp::Tls(tls) => {
+                tls.timeout(scope).map(TlsUdpTransport::from, TlsUdp::Tls)
+            }
+            TlsUdp::Udp(udp) => {
+                udp.timeout(scope).map(TlsUdpTransport::from, TlsUdp::Udp)
+            }
+        }
+    }
+
+    fn wakeup(self, scope: &mut Scope<Self::Context>)
+              -> Response<Self, Self::Seed> {
+        match self.0 {
+            TlsUdp::Tls(tls) => {
+                tls.wakeup(scope).map(TlsUdpTransport::from, TlsUdp::Tls)
+            }
+            TlsUdp::Udp(udp) => {
+                udp.wakeup(scope).map(TlsUdpTransport::from, TlsUdp::Udp)
+            }
+        }
+    }
+}
+
+
+//============ Server Machines ===============================================
+
+//------------ TlsServer -----------------------------------------------------
 
 pub struct TlsServer<X, H>(ServerMachine<X, TlsListener, H>)
            where H: AcceptHandler<TlsStream>;
@@ -51,58 +321,6 @@ impl<X, H: AcceptHandler<StartTlsStream>> Machine for StartTlsServer<X, H> {
     type Seed = <ServerMachine<X, StartTlsListener, H> as Machine>::Seed;
 
     wrapped_machine!(ServerMachine, StartTlsServer);
-}
-
-
-//------------ TlsClient ----------------------------------------------------
-
-pub struct TlsClient<X, RH, TH>(ClientMachine<X, TlsStream, RH, TH>)
-                     where RH: RequestHandler<TlsStream>,
-                           TH: TransportHandler<TlsStream, Seed=RH::Seed>;
-
-impl<X, RH, TH> TlsClient<X, RH, TH>
-                where RH: RequestHandler<TlsStream>,
-                      TH: TransportHandler<TlsStream, Seed=RH::Seed> {
-    pub fn new<S: GenericScope>(handler: RH, scope: &mut S)
-               -> (Self, DuctSender<RH::Request>) {
-        let (m, f) = ClientMachine::new(handler, scope);
-        (TlsClient(m), f)
-    }
-}
-
-impl<X, RH, TH> Machine for TlsClient<X, RH, TH>
-                where RH: RequestHandler<TlsStream>,
-                      TH: TransportHandler<TlsStream, Seed=RH::Seed> {
-    type Context = X;
-    type Seed = <ClientMachine<X, TlsStream, RH, TH> as Machine>::Seed;
-
-    wrapped_machine!(ClientMachine, TlsClient);
-}
-
-
-//------------ StartTlsClient -----------------------------------------------
-
-pub struct StartTlsClient<X, RH, TH>(ClientMachine<X, StartTlsStream, RH, TH>)
-                     where RH: RequestHandler<StartTlsStream>,
-                           TH: TransportHandler<StartTlsStream, Seed=RH::Seed>;
-
-impl<X, RH, TH> StartTlsClient<X, RH, TH>
-                where RH: RequestHandler<StartTlsStream>,
-                      TH: TransportHandler<StartTlsStream, Seed=RH::Seed> {
-    pub fn new<S: GenericScope>(handler: RH, scope: &mut S)
-               -> (Self, DuctSender<RH::Request>) {
-        let (m, f) = ClientMachine::new(handler, scope);
-        (StartTlsClient(m), f)
-    }
-}
-
-impl<X, RH, TH> Machine for StartTlsClient<X, RH, TH>
-                where RH: RequestHandler<StartTlsStream>,
-                      TH: TransportHandler<StartTlsStream, Seed=RH::Seed> {
-    type Context = X;
-    type Seed = <ClientMachine<X, StartTlsStream, RH, TH> as Machine>::Seed;
-
-    wrapped_machine!(ClientMachine, StartTlsClient);
 }
 
 
@@ -252,275 +470,284 @@ impl<X, SH, CH, UH> Machine for TlsTcpUdpServer<X, SH, CH, UH>
 }
 
 
+//============ Client Machines ===============================================
+
+//------------ TlsClient -----------------------------------------------------
+
+pub struct TlsClient<X, RH, TH>(RequestMachine<X, TlsTransport<X, TH>, RH,
+                                               TlsFactory<TH::Seed>>)
+    where RH: RequestHandler<Output=(SocketAddr, TH::Seed)>,
+          TH: TransportHandler<TlsStream>;
+
+impl<X, RH, TH> TlsClient<X, RH, TH>
+                where RH: RequestHandler<Output=(SocketAddr, TH::Seed)>,
+                      TH: TransportHandler<TlsStream> {
+    pub fn new<S>(handler: RH, ctx: SslContext, scope: &mut S)
+                  -> (Response<Self, Void>, DuctSender<RH::Request>)
+               where S: GenericScope {
+        let (m, tx) = RequestMachine::new(handler, TlsFactory::new(ctx),
+                                          scope);
+        (m.map_self(TlsClient), tx)
+    }
+}
+
+impl<X, RH, TH> Machine for TlsClient<X, RH, TH>
+                where RH: RequestHandler<Output=(SocketAddr, TH::Seed)>,
+                      TH: TransportHandler<TlsStream> {
+    wrapped_machine!(X, (TlsStream, TH::Seed),
+                     RequestMachine, TlsClient);
+}
+
+
+//------------ StartTlsClient -----------------------------------------------
+
+pub struct StartTlsClient<X, RH, TH>(RequestMachine<X,
+                                                    StartTlsTransport<X, TH>,
+                                                    RH,
+                                                    StartTlsFactory<TH::Seed>>)
+    where RH: RequestHandler<Output=(SocketAddr, TH::Seed)>,
+          TH: TransportHandler<StartTlsStream>;
+
+impl<X, RH, TH> StartTlsClient<X, RH, TH>
+                where RH: RequestHandler<Output=(SocketAddr, TH::Seed)>,
+                      TH: TransportHandler<StartTlsStream> {
+    pub fn new<S>(handler: RH, ctx: SslContext, scope: &mut S)
+                  -> (Response<Self, Void>, DuctSender<RH::Request>)
+               where S: GenericScope {
+        let (m, tx) = RequestMachine::new(handler, StartTlsFactory::new(ctx),
+                                          scope);
+        (m.map_self(StartTlsClient), tx)
+    }
+}
+
+impl<X, RH, TH> Machine for StartTlsClient<X, RH, TH>
+                where RH: RequestHandler<Output=(SocketAddr, TH::Seed)>,
+                      TH: TransportHandler<StartTlsStream> {
+    wrapped_machine!(X, (StartTlsStream, TH::Seed),
+                     RequestMachine, StartTlsClient);
+}
+
+
+//------------ TlsTcpClient -------------------------------------------------
+
+pub struct TlsTcpClient<X, RH, SH, CH>(
+    RequestMachine<X, TlsTcpTransport<X, SH, CH>, RH,
+                   TlsTcpFactory<SH::Seed, CH::Seed>>
+) where RH: RequestHandler<Output=TlsTcp<(SocketAddr, SH::Seed),
+                                         (SocketAddr, CH::Seed)>>,
+        SH: TransportHandler<TlsStream>,
+        CH: TransportHandler<TcpStream>;
+
+impl<X, RH, SH, CH> TlsTcpClient<X, RH, SH, CH>
+            where RH: RequestHandler<Output=TlsTcp<(SocketAddr, SH::Seed),
+                                                   (SocketAddr, CH::Seed)>>,
+                  SH: TransportHandler<TlsStream>,
+                  CH: TransportHandler<TcpStream> {
+    pub fn new<S>(handler: RH, ctx: SslContext, scope: &mut S)
+                  -> (Response<Self, Void>, DuctSender<RH::Request>)
+               where S: GenericScope {
+        let (m, tx) = RequestMachine::new(handler, TlsTcpFactory::new(ctx),
+                                          scope);
+        (m.map_self(TlsTcpClient), tx)
+    }
+}
+
+impl<X, RH, SH, CH> Machine for TlsTcpClient<X, RH, SH, CH>
+            where RH: RequestHandler<Output=TlsTcp<(SocketAddr, SH::Seed),
+                                                   (SocketAddr, CH::Seed)>>,
+                  SH: TransportHandler<TlsStream>,
+                  CH: TransportHandler<TcpStream> {
+    wrapped_machine!(X, TlsTcp<(TlsStream, SH::Seed), (TcpStream, CH::Seed)>,
+                     RequestMachine, TlsTcpClient);
+}
+
+
 //------------ TlsUdpClient -------------------------------------------------
 
 pub struct TlsUdpClient<X, RH, TH, UH>(
-    RTU<RequestMachine<X, TlsOrUdp, RH>,
-        TransportMachine<X, TlsStream, TH>,
-        TransportMachine<X, UdpSocket, UH>>)
-    where RH: RequestHandler<TlsOrUdp>,
-          TH: TransportHandler<TlsStream, Seed=RH::Seed>,
-          UH: TransportHandler<UdpSocket, Seed=RH::Seed>;
-
-enum RTU<R, T, U> {
-    Req(R),
-    Tls(T),
-    Udp(U)
-}
+    RequestMachine<X, TlsUdpTransport<X, TH, UH>, RH,
+                   TlsUdpFactory<TH::Seed, UH::Seed>>
+) where RH: RequestHandler<Output=TlsUdp<(SocketAddr, TH::Seed),
+                                         (SocketAddr, UH::Seed)>>,
+        TH: TransportHandler<TlsStream>,
+        UH: TransportHandler<UdpSocket>;
 
 impl<X, RH, TH, UH> TlsUdpClient<X, RH, TH, UH>
-                    where RH: RequestHandler<TlsOrUdp>,
-                          TH: TransportHandler<TlsStream, Seed=RH::Seed>,
-                          UH: TransportHandler<UdpSocket, Seed=RH::Seed> {
-    fn req(req: RequestMachine<X, TlsOrUdp, RH>) -> Self {
-        TlsUdpClient(RTU::Req(req))
-    }
-
-    fn tcp(tcp: TransportMachine<X, TlsStream, TH>) -> Self {
-        TlsUdpClient(RTU::Tls(tcp))
-    }
-
-    fn udp(udp: TransportMachine<X, UdpSocket, UH>) -> Self {
-        TlsUdpClient(RTU::Udp(udp))
+          where RH: RequestHandler<Output=TlsUdp<(SocketAddr, TH::Seed),
+                                                 (SocketAddr, UH::Seed)>>,
+                TH: TransportHandler<TlsStream>,
+                UH: TransportHandler<UdpSocket> {
+    pub fn new<S>(handler: RH, ctx: SslContext, scope: &mut S)
+                  -> (Response<Self, Void>, DuctSender<RH::Request>)
+               where S: GenericScope {
+        let (m, tx) = RequestMachine::new(handler, TlsUdpFactory::new(ctx),
+                                          scope);
+        (m.map_self(TlsUdpClient), tx)
     }
 }
 
 impl<X, RH, TH, UH> Machine for TlsUdpClient<X, RH, TH, UH>
-                    where RH: RequestHandler<TlsOrUdp>,
-                          TH: TransportHandler<TlsStream, Seed=RH::Seed>,
-                          UH: TransportHandler<UdpSocket, Seed=RH::Seed> {
-    type Context = X;
-    type Seed = (TlsOrUdp, RH::Seed);
+          where RH: RequestHandler<Output=TlsUdp<(SocketAddr, TH::Seed),
+                                                 (SocketAddr, UH::Seed)>>,
+                TH: TransportHandler<TlsStream>,
+                UH: TransportHandler<UdpSocket> {
+    wrapped_machine!(X, TlsUdp<(TlsStream, TH::Seed), (UdpSocket, UH::Seed)>,
+                     RequestMachine, TlsUdpClient);
+}
 
-    fn create(seed: Self::Seed, scope: &mut Scope<X>)
-              -> Response<Self, Void> {
-        match seed.0 {
-            TlsOrUdp::Tls(tcp) => {
-                TransportMachine::create((tcp, seed.1), scope)
-                                 .map_self(TlsUdpClient::tcp)
-            }
-            TlsOrUdp::Udp(udp) => {
-                TransportMachine::create((udp, seed.1), scope)
-                                 .map_self(TlsUdpClient::udp)
-            }
-        }
-    }            
 
-    fn ready(self, events: EventSet, scope: &mut Scope<X>)
-             -> Response<Self, Self::Seed> {
-        match self.0 {
-            RTU::Req(req) => {
-                req.ready(events, scope).map_self(TlsUdpClient::req)
-            }
-            RTU::Tls(tcp) => {
-                tcp.ready(events, scope).map(TlsUdpClient::tcp,
-                                             TlsOrUdp::tcp)
-            }
-            RTU::Udp(udp) => {
-                udp.ready(events, scope).map(TlsUdpClient::udp, TlsOrUdp::udp)
-            }
+//============ Socket Factories ==============================================
+
+//------------ TlsFactory ----------------------------------------------------
+
+struct TlsFactory<S> {
+    ctx: SslContext,
+    marker: PhantomData<S>
+}
+
+impl<S> TlsFactory<S> {
+    fn new(ctx: SslContext) -> Self {
+        TlsFactory { ctx: ctx, marker: PhantomData }
+    }
+}
+
+impl<S> SeedFactory<(SocketAddr, S), (TlsStream, S)> for TlsFactory<S> {
+    fn translate(&self, output: (SocketAddr, S))
+                 -> Result<(TlsStream, S), TranslateError<(SocketAddr, S)>> {
+        let (addr, seed) = output;
+        match TlsStream::connect(&addr, &self.ctx) {
+            Ok(sock) => Ok((sock, seed)),
+            Err(err) => Err(TranslateError((addr, seed), err.into()))
         }
     }
+}
 
-    fn spawned(self, scope: &mut Scope<X>) -> Response<Self, Self::Seed> {
-        match self.0 {
-            RTU::Req(req) => {
-                req.spawned(scope).map_self(TlsUdpClient::req)
-            }
-            RTU::Tls(tcp) => {
-                tcp.spawned(scope).map(TlsUdpClient::tcp, TlsOrUdp::tcp)
-            }
-            RTU::Udp(udp) => {
-                udp.spawned(scope).map(TlsUdpClient::udp, TlsOrUdp::udp)
-            }
+
+//------------ StartTlsFactory -----------------------------------------------
+
+struct StartTlsFactory<S> {
+    ctx: SslContext,
+    marker: PhantomData<S>
+}
+
+impl<S> StartTlsFactory<S> {
+    fn new(ctx: SslContext) -> Self {
+        StartTlsFactory { ctx: ctx, marker: PhantomData }
+    }
+}
+
+impl<S> SeedFactory<(SocketAddr, S), (StartTlsStream, S)>
+        for StartTlsFactory<S> {
+    fn translate(&self, output: (SocketAddr, S))
+                 -> Result<(StartTlsStream, S),
+                           TranslateError<(SocketAddr, S)>> {
+        let (addr, seed) = output;
+        match StartTlsStream::connect(&addr, self.ctx.clone()) {
+            Ok(sock) => Ok((sock, seed)),
+            Err(err) => Err(TranslateError((addr, seed), err.into()))
         }
     }
+}
 
-    fn timeout(self, scope: &mut Scope<X>) -> Response<Self, Self::Seed> {
-        match self.0 {
-            RTU::Req(req) => {
-                req.timeout(scope).map_self(TlsUdpClient::req)
-            }
-            RTU::Tls(tcp) => {
-                tcp.timeout(scope).map(TlsUdpClient::tcp, TlsOrUdp::tcp)
-            }
-            RTU::Udp(udp) => {
-                udp.timeout(scope).map(TlsUdpClient::udp, TlsOrUdp::udp)
-            }
-        }
+
+//------------ TlsTcpFactory -------------------------------------------------
+
+struct TlsTcpFactory<S, C> {
+    ctx: SslContext,
+    marker: PhantomData<(S, C)>
+}
+
+impl<S, C> TlsTcpFactory<S, C> {
+    fn new(ctx: SslContext) -> Self {
+        TlsTcpFactory { ctx: ctx, marker: PhantomData }
     }
+}
 
-    fn wakeup(self, scope: &mut Scope<X>) -> Response<Self, Self::Seed> {
-        match self.0 {
-            RTU::Req(req) => {
-                req.wakeup(scope).map_self(TlsUdpClient::req)
+impl<S, C> SeedFactory<TlsTcp<(SocketAddr, S), (SocketAddr, C)>,
+                       TlsTcp<(TlsStream, S), (TcpStream, C)>>
+           for TlsTcpFactory<S, C> {
+    fn translate(&self, output: TlsTcp<(SocketAddr, S), (SocketAddr, C)>)
+                 -> Result<TlsTcp<(TlsStream, S), (TcpStream, C)>,
+                           TranslateError<TlsTcp<(SocketAddr, S),
+                                                 (SocketAddr, C)>>> {
+        use self::TlsTcp::*;
+
+        match output {
+            Tls((addr, seed)) => {
+                match TlsStream::connect(&addr, &self.ctx) {
+                    Ok(sock) => Ok(Tls((sock, seed))),
+                    Err(err) => Err(TranslateError(Tls((addr, seed)),
+                                                   err.into()))
+                }
             }
-            RTU::Tls(tcp) => {
-                tcp.wakeup(scope).map(TlsUdpClient::tcp, TlsOrUdp::tcp)
-            }
-            RTU::Udp(udp) => {
-                udp.wakeup(scope).map(TlsUdpClient::udp, TlsOrUdp::udp)
+            Tcp((addr, seed)) => {
+                match TcpStream::connect(&addr) {
+                    Ok(sock) => Ok(Tcp((sock, seed))),
+                    Err(err) => Err(TranslateError(Tcp((addr, seed)),
+                                                   err.into()))
+                }
             }
         }
     }
 }
 
 
-//------------ TlsOrUdp ------------------------------------------------------
+//------------ TlsUdpFactory -------------------------------------------------
 
-pub enum TlsOrUdp {
-    Tls(TlsStream),
-    Udp(UdpSocket)
+struct TlsUdpFactory<T, U> {
+    ctx: SslContext,
+    marker: PhantomData<(T, U)>
 }
 
-
-impl TlsOrUdp {
-    fn tcp<T>(seed: (TlsStream, T)) -> (Self, T) {
-        (TlsOrUdp::Tls(seed.0), seed.1)
-    }
-
-    fn udp<T>(seed: (UdpSocket, T)) -> (Self, T) {
-        (TlsOrUdp::Udp(seed.0), seed.1)
+impl<T, U> TlsUdpFactory<T, U> {
+    fn new(ctx: SslContext) -> Self {
+        TlsUdpFactory { ctx: ctx, marker: PhantomData }
     }
 }
 
+impl<T, U> SeedFactory<TlsUdp<(SocketAddr, T), (SocketAddr, U)>,
+                       TlsUdp<(TlsStream, T), (UdpSocket, U)>>
+           for TlsUdpFactory<T, U> {
+    fn translate(&self, output: TlsUdp<(SocketAddr, T), (SocketAddr, U)>)
+                 -> Result<TlsUdp<(TlsStream, T), (UdpSocket, U)>,
+                           TranslateError<TlsUdp<(SocketAddr, T),
+                                                 (SocketAddr, U)>>> {
+        use self::TlsUdp::*;
 
-//------------ StartTlsUdpClient --------------------------------------------
+        match output {
+            Tls((addr, seed)) => {
+                match TlsStream::connect(&addr, &self.ctx) {
+                    Ok(sock) => Ok(Tls((sock, seed))),
+                    Err(err) => Err(TranslateError(Tls((addr, seed)),
+                                                   err.into()))
+                }
+            }
+            Udp((addr, seed)) => {
+                match UdpSocket::bound(&addr) {
+                    Ok(sock) => Ok(Udp((sock, seed))),
+                    Err(err) => Err(TranslateError(Udp((addr, seed)),
+                                                   err.into()))
+                }
+            }
+        }
+    }
+}
 
-pub struct StartTlsUdpClient<X, RH, TH, UH>(
-    RSU<RequestMachine<X, StartTlsOrUdp, RH>,
-        TransportMachine<X, StartTlsStream, TH>,
-        TransportMachine<X, UdpSocket, UH>>)
-    where RH: RequestHandler<StartTlsOrUdp>,
-          TH: TransportHandler<StartTlsStream, Seed=RH::Seed>,
-          UH: TransportHandler<UdpSocket, Seed=RH::Seed>;
 
-enum RSU<R, T, U> {
-    Req(R),
-    StartTls(T),
+//============ Composition Types =============================================
+
+pub enum TlsTcp<S, C> {
+    Tls(S),
+    Tcp(C)
+}
+
+pub enum TlsUdp<T, U> {
+    Tls(T),
     Udp(U)
 }
 
-impl<X, RH, TH, UH> StartTlsUdpClient<X, RH, TH, UH>
-                    where RH: RequestHandler<StartTlsOrUdp>,
-                          TH: TransportHandler<StartTlsStream, Seed=RH::Seed>,
-                          UH: TransportHandler<UdpSocket, Seed=RH::Seed> {
-    fn req(req: RequestMachine<X, StartTlsOrUdp, RH>) -> Self {
-        StartTlsUdpClient(RSU::Req(req))
-    }
-
-    fn tcp(tcp: TransportMachine<X, StartTlsStream, TH>) -> Self {
-        StartTlsUdpClient(RSU::StartTls(tcp))
-    }
-
-    fn udp(udp: TransportMachine<X, UdpSocket, UH>) -> Self {
-        StartTlsUdpClient(RSU::Udp(udp))
-    }
+pub enum TlsTcpOrUdp<S, C, U> {
+    Tls(S),
+    Tcp(C),
+    Udp(U)
 }
-
-impl<X, RH, TH, UH> Machine for StartTlsUdpClient<X, RH, TH, UH>
-                    where RH: RequestHandler<StartTlsOrUdp>,
-                          TH: TransportHandler<StartTlsStream, Seed=RH::Seed>,
-                          UH: TransportHandler<UdpSocket, Seed=RH::Seed> {
-    type Context = X;
-    type Seed = (StartTlsOrUdp, RH::Seed);
-
-    fn create(seed: Self::Seed, scope: &mut Scope<X>)
-              -> Response<Self, Void> {
-        match seed.0 {
-            StartTlsOrUdp::StartTls(tcp) => {
-                TransportMachine::create((tcp, seed.1), scope)
-                                 .map_self(StartTlsUdpClient::tcp)
-            }
-            StartTlsOrUdp::Udp(udp) => {
-                TransportMachine::create((udp, seed.1), scope)
-                                 .map_self(StartTlsUdpClient::udp)
-            }
-        }
-    }            
-
-    fn ready(self, events: EventSet, scope: &mut Scope<X>)
-             -> Response<Self, Self::Seed> {
-        match self.0 {
-            RSU::Req(req) => {
-                req.ready(events, scope).map_self(StartTlsUdpClient::req)
-            }
-            RSU::StartTls(tcp) => {
-                tcp.ready(events, scope).map(StartTlsUdpClient::tcp,
-                                             StartTlsOrUdp::tcp)
-            }
-            RSU::Udp(udp) => {
-                udp.ready(events, scope).map(StartTlsUdpClient::udp,
-                                             StartTlsOrUdp::udp)
-            }
-        }
-    }
-
-    fn spawned(self, scope: &mut Scope<X>) -> Response<Self, Self::Seed> {
-        match self.0 {
-            RSU::Req(req) => {
-                req.spawned(scope).map_self(StartTlsUdpClient::req)
-            }
-            RSU::StartTls(tcp) => {
-                tcp.spawned(scope).map(StartTlsUdpClient::tcp,
-                                       StartTlsOrUdp::tcp)
-            }
-            RSU::Udp(udp) => {
-                udp.spawned(scope).map(StartTlsUdpClient::udp,
-                                       StartTlsOrUdp::udp)
-            }
-        }
-    }
-
-    fn timeout(self, scope: &mut Scope<X>) -> Response<Self, Self::Seed> {
-        match self.0 {
-            RSU::Req(req) => {
-                req.timeout(scope).map_self(StartTlsUdpClient::req)
-            }
-            RSU::StartTls(tcp) => {
-                tcp.timeout(scope).map(StartTlsUdpClient::tcp,
-                                       StartTlsOrUdp::tcp)
-            }
-            RSU::Udp(udp) => {
-                udp.timeout(scope).map(StartTlsUdpClient::udp,
-                                       StartTlsOrUdp::udp)
-            }
-        }
-    }
-
-    fn wakeup(self, scope: &mut Scope<X>) -> Response<Self, Self::Seed> {
-        match self.0 {
-            RSU::Req(req) => {
-                req.wakeup(scope).map_self(StartTlsUdpClient::req)
-            }
-            RSU::StartTls(tcp) => {
-                tcp.wakeup(scope).map(StartTlsUdpClient::tcp,
-                                      StartTlsOrUdp::tcp)
-            }
-            RSU::Udp(udp) => {
-                udp.wakeup(scope).map(StartTlsUdpClient::udp,
-                                      StartTlsOrUdp::udp)
-            }
-        }
-    }
-}
-
-
-//------------ StartTlsOrUdp -------------------------------------------------
-
-pub enum StartTlsOrUdp {
-    StartTls(StartTlsStream),
-    Udp(UdpSocket)
-}
-
-
-impl StartTlsOrUdp {
-    fn tcp<T>(seed: (StartTlsStream, T)) -> (Self, T) {
-        (StartTlsOrUdp::StartTls(seed.0), seed.1)
-    }
-
-    fn udp<T>(seed: (UdpSocket, T)) -> (Self, T) {
-        (StartTlsOrUdp::Udp(seed.0), seed.1)
-    }
-}
-
