@@ -48,6 +48,20 @@ pub trait AcceptHandler<T> {
     /// [TransportHandler]: trait.TransportHandler.html
     fn accept(&mut self, addr: &SocketAddr)
               -> Option<<Self::Output as TransportHandler<T>>::Seed>;
+
+    /// Handles an error that happened during accepting.
+    ///
+    /// Returns whether to continue (`Ok(())`) or shut down (`Err(())`).
+    /// The somewhat odd return type was chosen over a simple `bool` to
+    /// make clear what is what.
+    ///
+    /// Normally the default implementation of just logging the error and
+    /// moving on is fine.
+    fn error(&mut self, err: Error) -> Result<(),()>
+    {
+        error!("accept error: {}", err);
+        Ok(())
+    }
 }
 
 

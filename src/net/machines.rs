@@ -59,6 +59,7 @@ impl<X, T: Transport, H: TransportHandler<T>> TransportMachine<X, T, H> {
     /// The return value is the one expected by the `add_machine_with()`
     /// functions of [LoopCreator] and [LoopInstance].
     ///
+    /// [create()]: ../../handlers/trait.TransportHandler.html#tymethod.create
     /// [LoopCreator]: ../../../rotor/struct.LoopCreator.html
     /// [LoopInstance]: ../../../rotor/struct.LoopInstance.html
     pub fn new<S: GenericScope>(mut sock: T, seed: H::Seed, scope: &mut S)
@@ -231,25 +232,56 @@ impl<X, T, H> Machine for TransportMachine<X, T, H>
 /// returns `Some(_)`thing creates a new machine of the second flavor.
 ///
 /// Typically, you will create one or more machines of the accept flavor
-/// during loop creating using the [new()](#method.new) function.
+/// during loop creating using the [new()](#method.new) function. If you need
+/// to create and close accept sockets on the fly, you should wrap the server
+/// machine into a [RequestMachine].
+///
+/// [RequestMachine]: ../../request/struct.RequestMachine.html
 pub struct ServerMachine<X, A, H>(
     ServerInner<A, H, TransportMachine<X, A::Output, H::Output>>,
-    PhantomData<X>)
-           where A: Accept, H: AcceptHandler<A::Output>;
+    PhantomData<X>
+) where A: Accept, H: AcceptHandler<A::Output>;
 
+
+/// The two flavors of a server machine.
 enum ServerInner<A, H, M> {
+    /// Accept socket and handler.
+    ///
+    /// Never mind the use of term ‘listener’ here …
     Lsnr(ServerListener<A, H>),
+
+    /// A wrapped transport machine.
     Conn(M)
 }
 
+/// All we need for a listenig flavor machine.
 struct ServerListener<A, H> {
+    /// The accept socket.
     sock: A,
+
+    /// The accept handler.
     handler: H,
+
+    /// The receiving end of a trigger for shutting down the machine.
     rx: TriggerReceiver
 }
 
 
+/// # Machine Creation
+///
 impl<X, A: Accept, H: AcceptHandler<A::Output>> ServerMachine<X, A, H> {
+    /// Creates a new machine.
+    ///
+    /// More specifically, it creates a machine of the accept flavor using
+    /// the provided accept socket and accept handler atop the given scope.
+    ///
+    /// Returns a response to be passed to rotor and the sending end of a
+    /// [trigger] that can be used to shut down the machine later and close
+    /// the accept socket later.
+    ///
+    /// Note that the response may be an error, in which case calling
+    /// `is_stopped()` on it will return true. While this is relatively
+    /// unlikely, it may happen.
     pub fn new<S: GenericScope>(sock: A, handler: H, scope: &mut S)
                                 -> (Response<Self, Void>, TriggerSender) {
         let (tx, rx) = trigger(scope.notifier());
@@ -264,16 +296,25 @@ impl<X, A: Accept, H: AcceptHandler<A::Output>> ServerMachine<X, A, H> {
     }
 }
 
+
+/// # Internal Helpers
+/// 
 impl<X, A: Accept, H: AcceptHandler<A::Output>> ServerMachine<X, A, H> {
+    /// Creates an accept flavor value.
     fn lsnr(lsnr: ServerListener<A, H>) -> Self {
         ServerMachine(ServerInner::Lsnr(lsnr), PhantomData)
     }
 
+    /// Creates a connection flavor value.
     fn conn(conn: TransportMachine<X, A::Output, H::Output>)
             -> Self {
         ServerMachine(ServerInner::Conn(conn), PhantomData)
     }
 
+    /// Accepts a new connection request.
+    ///
+    /// If a call to [Accept::accept()] fails, simply logs the error and
+    /// moves on. Alternatively, we could adda  
     fn accept(mut lsnr: ServerListener<A, H>)
               -> Response<Self, <Self as Machine>::Seed> {
         match lsnr.sock.accept() {
@@ -288,9 +329,11 @@ impl<X, A: Accept, H: AcceptHandler<A::Output>> ServerMachine<X, A, H> {
             Ok(None) => {
                 Response::ok(ServerMachine::lsnr(lsnr))
             }
-            Err(_) => {
-                // XXX log
-                Response::ok(ServerMachine::lsnr(lsnr))
+            Err(err) => {
+                match lsnr.handler.error(err.into()) {
+                    Ok(()) => Response::ok(ServerMachine::lsnr(lsnr)),
+                    Err(()) => Response::done()
+                }
             }
         }
     }
