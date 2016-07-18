@@ -9,7 +9,7 @@ use rotor::mio::udp::UdpSocket;
 use ::sockets::openssl::{TlsListener, TlsStream, StartTlsListener,
                          StartTlsStream};
 use super::machines::{ServerMachine, TransportMachine};
-use super::clear::{TcpServer, TcpTransport, UdpServer, UdpTransport};
+use super::clear::{TcpServer, TcpTransport, UdpTransport};
 use ::compose::{Compose2, Compose3};
 use ::handlers::{AcceptHandler, RequestHandler, TransportHandler};
 use ::request::{RequestMachine, SeedFactory, TranslateError};
@@ -370,7 +370,7 @@ impl<X, SH, CH> Machine for TlsTcpServer<X, SH, CH>
 //------------ TlsUdpServer -------------------------------------------------
 
 pub struct TlsUdpServer<X, AH, UH>(Compose2<TlsServer<X, AH>,
-                                            UdpServer<X, UH>>)
+                                            UdpTransport<X, UH>>)
            where AH: AcceptHandler<TlsStream>,
                  UH: TransportHandler<UdpSocket>;
 
@@ -386,7 +386,7 @@ impl<X, AH, UH> TlsUdpServer<X, AH, UH>
 
     pub fn new_udp<S: GenericScope>(sock: UdpSocket, seed: UH::Seed,
                                     scope: &mut S) -> Response<Self, Void> {
-        UdpServer::new(sock, seed, scope)
+        UdpTransport::new(sock, seed, scope)
                   .map_self(|m| TlsUdpServer(Compose2::B(m)))
     }
 }
@@ -396,7 +396,7 @@ impl<X, AH, UH> Machine for TlsUdpServer<X, AH, UH>
                       UH: TransportHandler<UdpSocket> {
     type Context = X;
     type Seed = <Compose2<TlsServer<X, AH>,
-                          UdpServer<X, UH>> as Machine>::Seed;
+                          UdpTransport<X, UH>> as Machine>::Seed;
 
     wrapped_machine!(Compose2, TlsUdpServer);
 }
@@ -405,7 +405,7 @@ impl<X, AH, UH> Machine for TlsUdpServer<X, AH, UH>
 //------------ StartTlsUdpServer --------------------------------------------
 
 pub struct StartTlsUdpServer<X, AH, UH>(Compose2<StartTlsServer<X, AH>,
-                                            UdpServer<X, UH>>)
+                                            UdpTransport<X, UH>>)
            where AH: AcceptHandler<StartTlsStream>,
                  UH: TransportHandler<UdpSocket>;
 
@@ -421,7 +421,7 @@ impl<X, AH, UH> StartTlsUdpServer<X, AH, UH>
 
     pub fn new_udp<S: GenericScope>(sock: UdpSocket, seed: UH::Seed,
                                     scope: &mut S) -> Response<Self, Void> {
-        UdpServer::new(sock, seed, scope)
+        UdpTransport::new(sock, seed, scope)
                   .map_self(|m| StartTlsUdpServer(Compose2::B(m)))
     }
 }
@@ -431,7 +431,7 @@ impl<X, AH, UH> Machine for StartTlsUdpServer<X, AH, UH>
                       UH: TransportHandler<UdpSocket> {
     type Context = X;
     type Seed = <Compose2<StartTlsServer<X, AH>,
-                          UdpServer<X, UH>> as Machine>::Seed;
+                          UdpTransport<X, UH>> as Machine>::Seed;
 
     wrapped_machine!(Compose2, StartTlsUdpServer);
 }
@@ -441,7 +441,7 @@ impl<X, AH, UH> Machine for StartTlsUdpServer<X, AH, UH>
 
 pub struct TlsTcpUdpServer<X, SH, CH, UH>(Compose3<TlsServer<X, SH>,
                                                    TcpServer<X, CH>,
-                                                   UdpServer<X, UH>>)
+                                                   UdpTransport<X, UH>>)
     where SH: AcceptHandler<TlsStream>,
           CH: AcceptHandler<TcpStream>,
           UH: TransportHandler<UdpSocket>;
@@ -466,7 +466,7 @@ impl<X, SH, CH, UH> TlsTcpUdpServer<X, SH, CH, UH>
 
     pub fn new_udp<S: GenericScope>(sock: UdpSocket, seed: UH::Seed,
                                     scope: &mut S) -> Response<Self, Void> {
-        UdpServer::new(sock, seed, scope)
+        UdpTransport::new(sock, seed, scope)
                   .map_self(|m| TlsTcpUdpServer(Compose3::C(m)))
     }
 }
@@ -477,7 +477,7 @@ impl<X, SH, CH, UH> Machine for TlsTcpUdpServer<X, SH, CH, UH>
                           UH: TransportHandler<UdpSocket> {
     type Context = X;
     type Seed = <Compose3<TlsServer<X, SH>, TcpServer<X, CH>,
-                          UdpServer<X, UH>> as Machine>::Seed;
+                          UdpTransport<X, UH>> as Machine>::Seed;
 
     wrapped_machine!(Compose3, TlsTcpUdpServer);
 }

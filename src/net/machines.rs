@@ -312,9 +312,6 @@ impl<X, A: Accept, H: AcceptHandler<A::Output>> ServerMachine<X, A, H> {
     }
 
     /// Accepts a new connection request.
-    ///
-    /// If a call to [Accept::accept()] fails, simply logs the error and
-    /// moves on. Alternatively, we could adda  
     fn accept(mut lsnr: ServerListener<A, H>)
               -> Response<Self, <Self as Machine>::Seed> {
         match lsnr.sock.accept() {

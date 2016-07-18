@@ -20,6 +20,7 @@ use openssl::ssl::error::SslError as OpensslError;
 #[derive(Debug)]
 pub enum Error {
     Io(io::Error),
+    NoSlabSpace,
     Timeout,
     Tls, // XXX Make this proper.
 }
@@ -37,6 +38,7 @@ impl error::Error for Error {
     fn description(&self) -> &str {
         match *self {
             Error::Io(ref err) => err.description(),
+            Error::NoSlabSpace => "slab space limit reached",
             Error::Timeout => "Timeout",
             Error::Tls => "TLS error",
         }
