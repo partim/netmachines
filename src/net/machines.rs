@@ -1,4 +1,14 @@
 //! Fundamental machines for networked sockets.
+//!
+//! This module defines two generic types that can be resused for specific
+//! transport and server machines. There is no generic client machine; 
+//! it is already provided by the top-level [RequestMachine].
+//!
+//! These machines are not intended to be used directly but rather are the
+//! building blocks for the concrete machines provided the [net] module.
+//!
+//! [net]: ../index.html
+//! [RequestMachine]: ../../request/struct.RequestMachine.html
 
 use std::marker::PhantomData;
 use rotor::{EventSet, GenericScope, Machine, PollOpt, Response, Scope, Void};
@@ -6,19 +16,51 @@ use ::error::Error;
 use ::handlers::{AcceptHandler, TransportHandler};
 use ::next::Intent;
 use ::sockets::{Accept, Blocked, Transport};
+use ::sync::{TriggerReceiver, TriggerSender, trigger};
 use ::utils::ResponseExt;
 
 
 //------------ TransportMachine ----------------------------------------------
 
+/// A machine combining a transport socket and a transport handler.
+///
+/// The type is generic over the rotor context `X`, the transport socket
+/// type `T`, and the transport handler type `H`.
+///
+/// Machine can be created either during loop creating using the
+/// [new()](#method.new) function or, when the type is used in combined
+/// machines, during the [Machine::create()] method. The seed for this case
+/// is a pair of the new transport socket and the transport handler’s seed.
+///
+/// [Machine::create()]: ../../../rotor/trait.Machine.html#tymethod.create
 pub struct TransportMachine<X, T: Transport, H: TransportHandler<T>> {
+    /// The transport socket.
     sock: T,
+
+    /// The transport handler.
     handler: H,
+
+    /// The handler’s last intent. 
     intent: Intent,
+
+    /// Binding the context.
     marker: PhantomData<X>
 }
 
+/// # Machine Creation
+///
 impl<X, T: Transport, H: TransportHandler<T>> TransportMachine<X, T, H> {
+    /// Creates a new machine.
+    ///
+    /// The function takes a transport socket and a transport handler seed,
+    /// as well as the scope for the new machine. It creates a new machine
+    /// using this scope by calling the handler’s [create()] method.
+    ///
+    /// The return value is the one expected by the `add_machine_with()`
+    /// functions of [LoopCreator] and [LoopInstance].
+    ///
+    /// [LoopCreator]: ../../../rotor/struct.LoopCreator.html
+    /// [LoopInstance]: ../../../rotor/struct.LoopInstance.html
     pub fn new<S: GenericScope>(mut sock: T, seed: H::Seed, scope: &mut S)
                                 -> Response<Self, Void> {
         let next = H::create(seed, &mut sock, scope.notifier());
@@ -37,7 +79,12 @@ impl<X, T: Transport, H: TransportHandler<T>> TransportMachine<X, T, H> {
     }
 }
 
+/// # Internal Helpers
+///
 impl<X, T: Transport, H: TransportHandler<T>> TransportMachine<X, T, H> {
+    /// Creates a new object from its parts.
+    ///
+    /// Sadly, `new()` is already taken …
     fn make(sock: T, handler: H, intent: Intent) -> Self {
         TransportMachine {
             sock: sock,
@@ -47,6 +94,11 @@ impl<X, T: Transport, H: TransportHandler<T>> TransportMachine<X, T, H> {
         }
     }
 
+    /// Performs the final steps in successful event handling.
+    ///
+    /// Reregisters for the correct events depending on the socket’s
+    /// blocked state and the handler’s interests and generates the
+    /// correct response.
     fn next<S>(self, scope: &mut Scope<X>) -> Response<Self, S> {
         let events = match self.sock.blocked() {
             Some(Blocked::Read) => EventSet::readable(),
@@ -60,6 +112,10 @@ impl<X, T: Transport, H: TransportHandler<T>> TransportMachine<X, T, H> {
         self.response()
     }
 
+    /// Generates the correct response for this machine.
+    ///
+    /// This is a `Response::ok()` in any case, but may have a deadline
+    /// attached.
     fn response<S>(self) -> Response<Self, S> {
         if let Some(deadline) = self.intent.deadline() {
             Response::ok(self).deadline(deadline)
@@ -76,6 +132,8 @@ impl<X, T: Transport, H: TransportHandler<T>> TransportMachine<X, T, H> {
 impl<X, T, H> Machine for TransportMachine<X, T, H>
               where T: Transport, H: TransportHandler<T> {
     type Context = X;
+
+    /// Our seed is a pair of the new socket and the handler’s seed.
     type Seed = (T, H::Seed);
 
     fn create(seed: Self::Seed, scope: &mut Scope<X>)
@@ -159,29 +217,56 @@ impl<X, T, H> Machine for TransportMachine<X, T, H>
 
 //------------ ServerMachine ------------------------------------------------
 
+/// A server machine for a stream transport.
+///
+/// The type is generic over the rotor context `X`, the accept socket type
+/// `A` (which implies the transport socket type through `A::Output`), and
+/// the accept handler type `H` (which implies the transport handler type
+/// through `H::Output`).
+///
+/// The machine comes in two flavors. Either it consists of an accept socket
+/// and the accept handler or it wraps a transport machine for the implied
+/// transport type and handler. The first flavor calls the accept handler
+/// for every new connection request on the accept socket and, if the handler
+/// returns `Some(_)`thing creates a new machine of the second flavor.
+///
+/// Typically, you will create one or more machines of the accept flavor
+/// during loop creating using the [new()](#method.new) function.
 pub struct ServerMachine<X, A, H>(
     ServerInner<A, H, TransportMachine<X, A::Output, H::Output>>,
     PhantomData<X>)
            where A: Accept, H: AcceptHandler<A::Output>;
 
 enum ServerInner<A, H, M> {
-    Lsnr(A, H),
+    Lsnr(ServerListener<A, H>),
     Conn(M)
 }
 
+struct ServerListener<A, H> {
+    sock: A,
+    handler: H,
+    rx: TriggerReceiver
+}
+
+
 impl<X, A: Accept, H: AcceptHandler<A::Output>> ServerMachine<X, A, H> {
     pub fn new<S: GenericScope>(sock: A, handler: H, scope: &mut S)
-                                -> Response<Self, Void> {
+                                -> (Response<Self, Void>, TriggerSender) {
+        let (tx, rx) = trigger(scope.notifier());
         match scope.register(&sock, EventSet::readable(), PollOpt::level()) {
-            Ok(()) => Response::ok(ServerMachine::lsnr(sock, handler)),
-            Err(err) => Response::error(err.into()),
+            Ok(()) => {
+                let lsnr = ServerListener { sock: sock, handler: handler,
+                                            rx: rx };
+                (Response::ok(ServerMachine::lsnr(lsnr)), tx)
+            }
+            Err(err) => (Response::error(err.into()), tx),
         }
     }
 }
 
 impl<X, A: Accept, H: AcceptHandler<A::Output>> ServerMachine<X, A, H> {
-    fn lsnr(lsnr: A, handler: H) -> Self {
-        ServerMachine(ServerInner::Lsnr(lsnr, handler), PhantomData)
+    fn lsnr(lsnr: ServerListener<A, H>) -> Self {
+        ServerMachine(ServerInner::Lsnr(lsnr), PhantomData)
     }
 
     fn conn(conn: TransportMachine<X, A::Output, H::Output>)
@@ -189,24 +274,23 @@ impl<X, A: Accept, H: AcceptHandler<A::Output>> ServerMachine<X, A, H> {
         ServerMachine(ServerInner::Conn(conn), PhantomData)
     }
 
-    fn accept(lsnr: A, mut handler: H)
+    fn accept(mut lsnr: ServerListener<A, H>)
               -> Response<Self, <Self as Machine>::Seed> {
-        match lsnr.accept() {
+        match lsnr.sock.accept() {
             Ok(Some((sock, addr))) => {
-                if let Some(seed) = handler.accept(&addr) {
-                    Response::spawn(ServerMachine::lsnr(lsnr, handler),
-                                    (sock, seed))
+                if let Some(seed) = lsnr.handler.accept(&addr) {
+                    Response::spawn(ServerMachine::lsnr(lsnr), (sock, seed))
                 }
                 else {
-                    Response::ok(ServerMachine::lsnr(lsnr, handler))
+                    Response::ok(ServerMachine::lsnr(lsnr))
                 }
             }
             Ok(None) => {
-                Response::ok(ServerMachine::lsnr(lsnr, handler))
+                Response::ok(ServerMachine::lsnr(lsnr))
             }
             Err(_) => {
                 // XXX log
-                Response::ok(ServerMachine::lsnr(lsnr, handler))
+                Response::ok(ServerMachine::lsnr(lsnr))
             }
         }
     }
@@ -228,8 +312,8 @@ impl<X, A, H> Machine for ServerMachine<X, A, H>
     fn ready(self, events: EventSet, scope: &mut Scope<X>)
              -> Response<Self, Self::Seed> {
         match self.0 {
-            ServerInner::Lsnr(lsnr, handler) => {
-                ServerMachine::accept(lsnr, handler)
+            ServerInner::Lsnr(lsnr) => {
+                ServerMachine::accept(lsnr)
             }
             ServerInner::Conn(conn) => {
                 conn.ready(events, scope).map_self(ServerMachine::conn)
@@ -239,8 +323,8 @@ impl<X, A, H> Machine for ServerMachine<X, A, H>
 
     fn spawned(self, scope: &mut Scope<X>) -> Response<Self, Self::Seed> {
         match self.0 {
-            ServerInner::Lsnr(lsnr, handler) => {
-                ServerMachine::accept(lsnr, handler)
+            ServerInner::Lsnr(lsnr) => {
+                ServerMachine::accept(lsnr)
             }
             ServerInner::Conn(conn) => {
                 conn.spawned(scope).map_self(ServerMachine::conn)
@@ -250,7 +334,7 @@ impl<X, A, H> Machine for ServerMachine<X, A, H>
 
     fn timeout(self, scope: &mut Scope<X>) -> Response<Self, Self::Seed> {
         match self.0 {
-            ServerInner::Lsnr(..) => unreachable!("listener can’t timeout"),
+            ServerInner::Lsnr(_) => unreachable!("listener can’t timeout"),
             ServerInner::Conn(conn) => {
                 conn.timeout(scope).map_self(ServerMachine::conn)
             }
@@ -259,7 +343,14 @@ impl<X, A, H> Machine for ServerMachine<X, A, H>
 
     fn wakeup(self, scope: &mut Scope<X>) -> Response<Self, Self::Seed> {
         match self.0 {
-            ServerInner::Lsnr(..) => unreachable!("listener can’t wakeup"),
+            ServerInner::Lsnr(lsnr) => {
+                if lsnr.rx.triggered() {
+                    Response::done()
+                }
+                else {
+                    Response::ok(ServerMachine::lsnr(lsnr))
+                }
+            }
             ServerInner::Conn(conn) => {
                 conn.wakeup(scope).map_self(ServerMachine::conn)
             }

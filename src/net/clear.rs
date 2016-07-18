@@ -7,9 +7,9 @@ use rotor::mio::tcp::{TcpListener, TcpStream};
 use rotor::mio::udp::UdpSocket;
 use super::machines::{ServerMachine, TransportMachine};
 use ::handlers::{AcceptHandler, RequestHandler, TransportHandler};
-use ::machines::{RequestMachine, SeedFactory, TranslateError};
+use ::request::{RequestMachine, SeedFactory, TranslateError};
 use ::utils::ResponseExt;
-use ::sync::DuctSender;
+use ::sync::{DuctSender, TriggerSender};
 
 
 //============ Transport Machines ============================================
@@ -27,8 +27,10 @@ impl<X, H: TransportHandler<TcpStream>> TcpTransport<X, H> {
 }
 
 impl<X, H: TransportHandler<TcpStream>> Machine for TcpTransport<X, H> {
-    wrapped_machine!(X, (TcpStream, H::Seed),
-                     TransportMachine, TcpTransport);
+    type Context = X;
+    type Seed = (TcpStream, H::Seed);
+
+    wrapped_machine!(TransportMachine, TcpTransport);
 }
 
 
@@ -45,8 +47,10 @@ impl<X, H: TransportHandler<UdpSocket>> UdpTransport<X, H> {
 }
 
 impl<X, H: TransportHandler<UdpSocket>> Machine for UdpTransport<X, H> {
-    wrapped_machine!(X, (UdpSocket, H::Seed),
-                     TransportMachine, UdpTransport);
+    type Context = X;
+    type Seed = (UdpSocket, H::Seed);
+
+    wrapped_machine!(TransportMachine, UdpTransport);
 }
 
 
@@ -173,8 +177,9 @@ pub struct TcpServer<X, H>(ServerMachine<X, TcpListener, H>)
 
 impl<X, H: AcceptHandler<TcpStream>> TcpServer<X, H> {
     pub fn new<S: GenericScope>(sock: TcpListener, handler: H, scope: &mut S)
-                                -> Response<Self, Void> {
-        ServerMachine::new(sock, handler, scope).map_self(TcpServer)
+                                -> (Response<Self, Void>, TriggerSender) {
+        let (m, t) = ServerMachine::new(sock, handler, scope);
+        (m.map_self(TcpServer), t)
     }
 }
 
@@ -216,10 +221,11 @@ pub struct TcpUdpServer<X, AH, UH>(Compose2<TcpServer<X, AH>,
 impl<X, AH, UH> TcpUdpServer<X, AH, UH>
                 where AH: AcceptHandler<TcpStream>,
                       UH: TransportHandler<UdpSocket> {
-    pub fn new_tcp<S: GenericScope>(sock: TcpListener, handler: AH,
-                                    scope: &mut S) -> Response<Self, Void> {
-        TcpServer::new(sock, handler, scope)
-                  .map_self(|m| TcpUdpServer(Compose2::A(m)))
+    pub fn new_tcp<S>(sock: TcpListener, handler: AH, scope: &mut S)
+                      -> (Response<Self, Void>, TriggerSender)
+                   where S: GenericScope {
+        let (m, t) = TcpServer::new(sock, handler, scope);
+        (m.map_self(|m| TcpUdpServer(Compose2::A(m))), t)
     }
 
     pub fn new_udp<S: GenericScope>(sock: UdpSocket, seed: UH::Seed,
@@ -264,8 +270,10 @@ impl<X, RH, TH> TcpClient<X, RH, TH>
 impl<X, RH, TH> Machine for TcpClient<X, RH, TH>
                 where RH: RequestHandler<Output=(SocketAddr, TH::Seed)>,
                       TH: TransportHandler<TcpStream> {
-    wrapped_machine!(X, (TcpStream, TH::Seed),
-                     RequestMachine, TcpClient);
+    type Context = X;
+    type Seed = (TcpStream, TH::Seed);
+
+    wrapped_machine!(RequestMachine, TcpClient);
 }
 
 
@@ -327,8 +335,10 @@ impl<X, RH, TH, UH> Machine for TcpUdpClient<X, RH, TH, UH>
                                                      (SocketAddr, UH::Seed)>>,
                   TH: TransportHandler<TcpStream>,
                   UH: TransportHandler<UdpSocket> {
-    wrapped_machine!(X, TcpUdp<(TcpStream, TH::Seed), (UdpSocket, UH::Seed)>,
-                     RequestMachine, TcpUdpClient);
+    type Context = X;
+    type Seed = TcpUdp<(TcpStream, TH::Seed), (UdpSocket, UH::Seed)>;
+
+    wrapped_machine!(RequestMachine, TcpUdpClient);
 }
 
 

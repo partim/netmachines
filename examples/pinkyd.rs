@@ -95,7 +95,8 @@ fn main() {
     // supports. First we create the TCP server machine. It wants a value
     // of the accept handler, so we create one.
     lc.add_machine_with(|scope| {
-        FingerServer::new_tcp(tcp, StreamAccept::new(tx.clone()), scope)
+        // XXX Do something with the trigger.
+        FingerServer::new_tcp(tcp, StreamAccept::new(tx.clone()), scope).0
     }).unwrap();
 
     // ... and the UDP socket. This one needs a value of the seed for the
@@ -147,7 +148,8 @@ fn add_tls_sockets(__config: &Config, tx: &RequestSender,
     let tls = TlsListener::bind(&addr, ctx).unwrap();
 
     lc.add_machine_with(|scope| {
-        FingerServer::new_tls(tls, StreamAccept::new(tx.clone()), scope)
+        // XXX Do something with the trigger.
+        FingerServer::new_tls(tls, StreamAccept::new(tx.clone()), scope).0
     }).unwrap();
 }
 
@@ -382,18 +384,6 @@ impl<T: Stream> TransportHandler<T> for StreamHandler {
     fn error(self, _err: Error) -> Next<Self> {
         Next::remove()
     }
-
-    /// The transport machine has been removed.
-    ///
-    /// This is the last thing that happens in the lifecycle of a transport
-    /// machine. It’s main purpose is to give you a chance to salvage the
-    /// underlying transport socket. Since calling `Next::remove()` does not
-    /// mean the socket has actually been closed, it may still be good and
-    /// you could pass it on somewhere.
-    ///
-    /// But you don’t have to and the default implementation indeed just
-    /// drops everything:
-    fn remove(self, _sock: T) { }
 }
 
 

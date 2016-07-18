@@ -12,9 +12,9 @@ use super::machines::{ServerMachine, TransportMachine};
 use super::clear::{TcpServer, TcpTransport, UdpServer, UdpTransport};
 use ::compose::{Compose2, Compose3};
 use ::handlers::{AcceptHandler, RequestHandler, TransportHandler};
-use ::machines::{RequestMachine, SeedFactory, TranslateError};
+use ::request::{RequestMachine, SeedFactory, TranslateError};
 use ::utils::ResponseExt;
-use ::sync::DuctSender;
+use ::sync::{DuctSender, TriggerSender};
 
 //============ Transport Machines ============================================
 
@@ -31,8 +31,10 @@ impl<X, H: TransportHandler<TlsStream>> TlsTransport<X, H> {
 }
 
 impl<X, H: TransportHandler<TlsStream>> Machine for TlsTransport<X, H> {
-    wrapped_machine!(X, (TlsStream, H::Seed),
-                     TransportMachine, TlsTransport);
+    type Context = X;
+    type Seed = (TlsStream, H::Seed);
+
+    wrapped_machine!(TransportMachine, TlsTransport);
 }
 
 
@@ -50,8 +52,10 @@ impl<X, H: TransportHandler<StartTlsStream>> StartTlsTransport<X, H> {
 
 impl<X, H> Machine for StartTlsTransport<X, H>
            where H: TransportHandler<StartTlsStream> {
-    wrapped_machine!(X, (StartTlsStream, H::Seed),
-                     TransportMachine, StartTlsTransport);
+    type Context = X;
+    type Seed = (StartTlsStream, H::Seed);
+
+    wrapped_machine!(TransportMachine, StartTlsTransport);
 }
 
 
@@ -291,8 +295,9 @@ pub struct TlsServer<X, H>(ServerMachine<X, TlsListener, H>)
 
 impl<X, H: AcceptHandler<TlsStream>> TlsServer<X, H> {
     pub fn new<S: GenericScope>(sock: TlsListener, handler: H, scope: &mut S)
-                                -> Response<Self, Void> {
-        ServerMachine::new(sock, handler, scope).map_self(TlsServer)
+                                -> (Response<Self, Void>, TriggerSender) {
+        let (m, t) = ServerMachine::new(sock, handler, scope);
+        (m.map_self(TlsServer), t)
     }
 }
 
@@ -310,9 +315,11 @@ pub struct StartTlsServer<X, H>(ServerMachine<X, StartTlsListener, H>)
            where H: AcceptHandler<StartTlsStream>;
 
 impl<X, H: AcceptHandler<StartTlsStream>> StartTlsServer<X, H> {
-    pub fn new<S: GenericScope>(sock: StartTlsListener, handler: H,
-                                scope: &mut S) -> Response<Self, Void> {
-        ServerMachine::new(sock, handler, scope).map_self(StartTlsServer)
+    pub fn new<S>(sock: StartTlsListener, handler: H, scope: &mut S)
+                  -> (Response<Self, Void>, TriggerSender)
+               where S: GenericScope {
+        let (m, t) = ServerMachine::new(sock, handler, scope);
+        (m.map_self(StartTlsServer), t)
     }
 }
 
@@ -334,16 +341,18 @@ pub struct TlsTcpServer<X, SH, CH>(Compose2<TlsServer<X, SH>,
 impl<X, SH, CH> TlsTcpServer<X, SH, CH>
                 where SH: AcceptHandler<TlsStream>,
                       CH: AcceptHandler<TcpStream> {
-    pub fn new_tls<S: GenericScope>(sock: TlsListener, handler: SH,
-                                    scope: &mut S) -> Response<Self, Void> {
-        TlsServer::new(sock, handler, scope)
-                  .map_self(|m| TlsTcpServer((Compose2::A(m))))
+    pub fn new_tls<S>(sock: TlsListener, handler: SH, scope: &mut S)
+                      -> (Response<Self, Void>, TriggerSender)
+                   where S: GenericScope {
+        let (m, t) = TlsServer::new(sock, handler, scope);
+        (m.map_self(|m| TlsTcpServer((Compose2::A(m)))), t)
     }
 
-    pub fn new_tcp<S: GenericScope>(sock: TcpListener, handler: CH,
-                                    scope: &mut S) -> Response<Self, Void> {
-        TcpServer::new(sock, handler, scope)
-                  .map_self(|m| TlsTcpServer(Compose2::B(m)))
+    pub fn new_tcp<S>(sock: TcpListener, handler: CH, scope: &mut S)
+                      -> (Response<Self, Void>, TriggerSender)
+                   where S: GenericScope {
+        let (m, t) = TcpServer::new(sock, handler, scope);
+        (m.map_self(|m| TlsTcpServer(Compose2::B(m))), t)
     }
 }
 
@@ -368,10 +377,11 @@ pub struct TlsUdpServer<X, AH, UH>(Compose2<TlsServer<X, AH>,
 impl<X, AH, UH> TlsUdpServer<X, AH, UH>
                 where AH: AcceptHandler<TlsStream>,
                       UH: TransportHandler<UdpSocket> {
-    pub fn new_tls<S: GenericScope>(sock: TlsListener, handler: AH,
-                                    scope: &mut S) -> Response<Self, Void> {
-        TlsServer::new(sock, handler, scope)
-                  .map_self(|m| TlsUdpServer((Compose2::A(m))))
+    pub fn new_tls<S>(sock: TlsListener, handler: AH, scope: &mut S)
+                      -> (Response<Self, Void>, TriggerSender)
+                   where S: GenericScope {
+        let (m, t) = TlsServer::new(sock, handler, scope);
+        (m.map_self(|m| TlsUdpServer((Compose2::A(m)))), t)
     }
 
     pub fn new_udp<S: GenericScope>(sock: UdpSocket, seed: UH::Seed,
@@ -402,10 +412,11 @@ pub struct StartTlsUdpServer<X, AH, UH>(Compose2<StartTlsServer<X, AH>,
 impl<X, AH, UH> StartTlsUdpServer<X, AH, UH>
                 where AH: AcceptHandler<StartTlsStream>,
                       UH: TransportHandler<UdpSocket> {
-    pub fn new_tls<S: GenericScope>(sock: StartTlsListener, handler: AH,
-                                    scope: &mut S) -> Response<Self, Void> {
-        StartTlsServer::new(sock, handler, scope)
-                       .map_self(|m| StartTlsUdpServer((Compose2::A(m))))
+    pub fn new_tls<S>(sock: StartTlsListener, handler: AH, scope: &mut S)
+                      -> (Response<Self, Void>, TriggerSender)
+                   where S: GenericScope {
+        let (m, t) = StartTlsServer::new(sock, handler, scope);
+        (m.map_self(|m| StartTlsUdpServer((Compose2::A(m)))), t)
     }
 
     pub fn new_udp<S: GenericScope>(sock: UdpSocket, seed: UH::Seed,
@@ -439,16 +450,18 @@ impl<X, SH, CH, UH> TlsTcpUdpServer<X, SH, CH, UH>
                     where SH: AcceptHandler<TlsStream>,
                           CH: AcceptHandler<TcpStream>,
                           UH: TransportHandler<UdpSocket> {
-    pub fn new_tls<S: GenericScope>(sock: TlsListener, handler: SH,
-                                    scope: &mut S) -> Response<Self, Void> {
-        TlsServer::new(sock, handler, scope)
-                  .map_self(|m| TlsTcpUdpServer((Compose3::A(m))))
+    pub fn new_tls<S>(sock: TlsListener, handler: SH, scope: &mut S)
+                      -> (Response<Self, Void>, TriggerSender)
+                   where S: GenericScope {
+        let (m, t) = TlsServer::new(sock, handler, scope);
+        (m.map_self(|m| TlsTcpUdpServer((Compose3::A(m)))), t)
     }
 
-    pub fn new_tcp<S: GenericScope>(sock: TcpListener, handler: CH,
-                                    scope: &mut S) -> Response<Self, Void> {
-        TcpServer::new(sock, handler, scope)
-                  .map_self(|m| TlsTcpUdpServer(Compose3::B(m)))
+    pub fn new_tcp<S>(sock: TcpListener, handler: CH, scope: &mut S)
+                      -> (Response<Self, Void>, TriggerSender)
+                   where S: GenericScope {
+        let (m, t) = TcpServer::new(sock, handler, scope);
+        (m.map_self(|m| TlsTcpUdpServer(Compose3::B(m))), t)
     }
 
     pub fn new_udp<S: GenericScope>(sock: UdpSocket, seed: UH::Seed,
@@ -494,8 +507,10 @@ impl<X, RH, TH> TlsClient<X, RH, TH>
 impl<X, RH, TH> Machine for TlsClient<X, RH, TH>
                 where RH: RequestHandler<Output=(SocketAddr, TH::Seed)>,
                       TH: TransportHandler<TlsStream> {
-    wrapped_machine!(X, (TlsStream, TH::Seed),
-                     RequestMachine, TlsClient);
+    type Context = X;
+    type Seed = (TlsStream, TH::Seed);
+
+    wrapped_machine!(RequestMachine, TlsClient);
 }
 
 
@@ -523,8 +538,9 @@ impl<X, RH, TH> StartTlsClient<X, RH, TH>
 impl<X, RH, TH> Machine for StartTlsClient<X, RH, TH>
                 where RH: RequestHandler<Output=(SocketAddr, TH::Seed)>,
                       TH: TransportHandler<StartTlsStream> {
-    wrapped_machine!(X, (StartTlsStream, TH::Seed),
-                     RequestMachine, StartTlsClient);
+    type Context = X;
+    type Seed = (StartTlsStream, TH::Seed);
+    wrapped_machine!(RequestMachine, StartTlsClient);
 }
 
 
@@ -557,8 +573,10 @@ impl<X, RH, SH, CH> Machine for TlsTcpClient<X, RH, SH, CH>
                                                    (SocketAddr, CH::Seed)>>,
                   SH: TransportHandler<TlsStream>,
                   CH: TransportHandler<TcpStream> {
-    wrapped_machine!(X, TlsTcp<(TlsStream, SH::Seed), (TcpStream, CH::Seed)>,
-                     RequestMachine, TlsTcpClient);
+    type Context = X;
+    type Seed = TlsTcp<(TlsStream, SH::Seed), (TcpStream, CH::Seed)>;
+
+    wrapped_machine!(RequestMachine, TlsTcpClient);
 }
 
 
@@ -591,8 +609,10 @@ impl<X, RH, TH, UH> Machine for TlsUdpClient<X, RH, TH, UH>
                                                  (SocketAddr, UH::Seed)>>,
                 TH: TransportHandler<TlsStream>,
                 UH: TransportHandler<UdpSocket> {
-    wrapped_machine!(X, TlsUdp<(TlsStream, TH::Seed), (UdpSocket, UH::Seed)>,
-                     RequestMachine, TlsUdpClient);
+    type Context = X;
+    type Seed = TlsUdp<(TlsStream, TH::Seed), (UdpSocket, UH::Seed)>;
+
+    wrapped_machine!(RequestMachine, TlsUdpClient);
 }
 
 

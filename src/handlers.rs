@@ -21,6 +21,8 @@ use ::error::Error;
 use ::next::Next;
 
 
+//------------ AcceptHandler -------------------------------------------------
+
 /// The trait implemented by an accept handler.
 ///
 /// An accept handler is used by strem servers to process incoming
@@ -48,6 +50,8 @@ pub trait AcceptHandler<T> {
               -> Option<<Self::Output as TransportHandler<T>>::Seed>;
 }
 
+
+//------------ RequestHandler ------------------------------------------------
 
 /// The trait implemented by a request handler.
 ///
@@ -98,6 +102,8 @@ pub trait RequestHandler {
     }
 }
 
+
+//------------ TransportHandler ----------------------------------------------
 
 /// The trait implemented by a transport handler.
 ///
