@@ -20,6 +20,7 @@ extern crate security_framework;
 
 pub use error::{Error, Result};
 pub use handlers::{AcceptHandler, RequestHandler, TransportHandler};
+pub use next::Next;
 
 #[macro_use] mod macros;
 
