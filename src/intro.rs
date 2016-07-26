@@ -2,11 +2,31 @@
 //!
 //! <i>This module does not contain any code, only a lot of text.</i>
 //!
-//! This module introduces the reader to the *netmachines* crate. Since it
-//! is built on a stack of other crates and makes no attempt in hiding the
-//! fact, this introduction starts out with short introduction to these
-//! other building blocks: we will start by introducing [mio] and [rotor]
-//! before moving on to *netmachines* proper.
+//! Building network applications is notoriously difficult. Such applications
+//! need to implement often surprisingly complex protocols using a notoriously
+//! unreliably transport medium and be reliably able to operate with
+//! innocently or maliciously ignorant partners.
+//!
+//! One promising approach for surviving the resulting staggering complexity
+//! is deal with it in layers where each layer provides a relatively simple
+//! interface translating the calamities of underlying layers into a small
+//! set of well-defined requirements and promises. While such layers have to
+//! make some assumptions of their usage and may sacrifice a certain degree
+//! of possible performance, they make it possible to express a network
+//! application with relatively simple and understandable code and allow 
+//! someone trying to understand what is going on to focus on the particular
+//! part they are interested in.
+//!
+//! The *netmachines* crate is an attempt to provide such a layer for dealing
+//! with the network transports themselves. It defines a very small set of
+//! handler interfaces that operate on a variety of state machines covering
+//! different combinations of network transport use cases.
+//!
+//! The crate builds on top of two underlying layers. The state machines use
+//! funcationality provided by [rotor] which in turn performs asynchronous
+//! IO using [mio]. As netmachines doesn’t even try to hide this fact
+//! this introduction starts out with short introduction to these two
+//! other crates before moving on to netmachines proper.
 //!
 //!
 //! # Contents
