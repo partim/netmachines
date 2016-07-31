@@ -165,10 +165,10 @@ pub trait SecureStream: Stream {
 /// [ClearStream]: trait.ClearStream.html
 /// [SecureStream]: trait.SecureStream.html
 /// [TransportHandler]: ../handlers/trait.TransportHandler.html
-pub trait HybridStream: Read + Write + Transport {
+pub trait HybridStream: Stream {
     /// Starts the encryption handshake for this socket.
     ///
-    /// The actual handshake will happen synchronously, so an `Ok(())`
+    /// The actual handshake will happen asynchronously, so an `Ok(())`
     /// return value will not mean that the socket is now encrypted.
     /// However, reading and writing after calling this method will only
     /// succeed if the handshake has succeeded. While the handshake is
