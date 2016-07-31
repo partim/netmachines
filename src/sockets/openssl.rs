@@ -303,6 +303,8 @@ impl HybridStream for StartTlsStream {
     }
 }
 
+impl Stream for StartTlsStream { }
+
 impl io::Read for StartTlsStream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let res = match self.sock {
