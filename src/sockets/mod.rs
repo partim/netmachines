@@ -145,6 +145,9 @@ impl ClearStream for TcpStream { }
 /// [ClearStream]: trait.ClearStream.html
 /// [TransportHandler]: ../handlers/trait.TransportHandler.html
 pub trait SecureStream: Stream {
+    type Certificate: Certificate;
+
+    fn get_peer_cert(&self) -> Self::Certificate;
 }
 
 
@@ -166,6 +169,8 @@ pub trait SecureStream: Stream {
 /// [SecureStream]: trait.SecureStream.html
 /// [TransportHandler]: ../handlers/trait.TransportHandler.html
 pub trait HybridStream: Stream {
+    type Certificate: Certificate;
+
     /// Starts the encryption handshake for this socket.
     ///
     /// The actual handshake will happen asynchronously, so an `Ok(())`
@@ -185,6 +190,8 @@ pub trait HybridStream: Stream {
 
     /// Returns whether the stream is encrypted.
     fn is_secure(&self) -> bool;
+
+    fn get_peer_cert(&self) -> Option<Self::Certificate>;
 }
 
 
@@ -263,6 +270,16 @@ impl Dgram for UdpSocket {
         self.send_to(buf, target)
     }
 }
+
+
+//------------ Certificate --------------------------------------------------
+
+/// A trait for access to information of an X.509 certificate.
+///
+/// This is a placeholder at the moment.
+pub trait Certificate { }
+
+impl Certificate for () { }
 
 
 //------------ Blocked -------------------------------------------------------

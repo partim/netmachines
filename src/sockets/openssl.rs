@@ -101,7 +101,13 @@ impl TlsStream {
     }
 }
 
-impl SecureStream for TlsStream { }
+impl SecureStream for TlsStream {
+    type Certificate = ();
+
+    fn get_peer_cert(&self) -> Self::Certificate {
+        ()
+    }
+}
 
 impl Stream for TlsStream { }
 
@@ -271,6 +277,8 @@ impl StartTlsStream {
 }
 
 impl HybridStream for StartTlsStream {
+    type Certificate = ();
+
     fn connect_secure(&mut self) -> Result<()> {
         let sock = mem::replace(&mut self.sock, None);
         if let Some(StartTlsSock::Clear(sock)) = sock {
@@ -300,6 +308,11 @@ impl HybridStream for StartTlsStream {
             Some(StartTlsSock::Secure(_)) => true,
             _ => false,
         }
+    }
+
+    fn get_peer_cert(&self) -> Option<Self::Certificate> {
+        if self.is_secure() { Some(()) }
+        else { None }
     }
 }
 
