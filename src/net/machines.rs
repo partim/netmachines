@@ -205,8 +205,8 @@ impl<X, T, H> Machine for TransportMachine<X, T, H>
         }
     }
 
-    fn wakeup(self, scope: &mut Scope<X>) -> Response<Self, Self::Seed> {
-        let next = self.handler.wakeup();
+    fn wakeup(mut self, scope: &mut Scope<X>) -> Response<Self, Self::Seed> {
+        let next = self.handler.wakeup(&mut self.sock);
         if let Some((intent, handler)) = self.intent.merge(next, scope) {
             TransportMachine::make(self.sock, handler, intent).next(scope)
         }

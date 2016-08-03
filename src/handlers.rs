@@ -228,7 +228,7 @@ pub trait TransportHandler<T>: Sized {
     /// method has been successfully called. It will be called irregardless
     /// of the events requested. You do not have to call `Next::wait()` in
     /// order to being woken up.
-    fn wakeup(self) -> Next<Self>;
+    fn wakeup(self, sock: &mut T) -> Next<Self>;
 
     /// Called when an error has occured on the socket.
     ///
