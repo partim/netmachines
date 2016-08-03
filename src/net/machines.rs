@@ -168,6 +168,7 @@ impl<X, T, H> Machine for TransportMachine<X, T, H>
             events
         };
 
+        self.intent = Intent::default();
         if events.is_readable() {
             let next = self.handler.readable(&mut self.sock);
             if let Some((intent, handler)) = self.intent.merge(next, scope) {

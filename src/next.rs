@@ -147,3 +147,8 @@ impl Intent {
     }
 }
 
+impl Default for Intent {
+    fn default() -> Self {
+        Intent { interest: Interest::Wait, deadline: None }
+    }
+}
