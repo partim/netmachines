@@ -361,7 +361,7 @@ impl<T: Stream> TransportHandler<T> for StreamHandler {
     /// This happens once for each time `wakeup()` is successfully called on
     /// a copy of the machine’s notifier. Calls are not limited to when
     /// `Next::wait()` was returned but can happen at any time.
-    fn wakeup(self) -> Next<Self> {
+    fn wakeup(self, _sock: &mut T) -> Next<Self> {
         match self {
             val @ StreamHandler::Request(_) => Next::read(val),
             StreamHandler::Await(await) => await.wakeup(),
@@ -660,7 +660,7 @@ impl<T: Dgram> TransportHandler<T> for DgramHandler {
         self.next()
     }
 
-    fn wakeup(mut self) -> Next<Self> {
+    fn wakeup(mut self, _sock: &mut T) -> Next<Self> {
         if let Ok(Some((message, addr))) = self.rx.try_recv() {
             self.send = Some((message, addr));
         }
